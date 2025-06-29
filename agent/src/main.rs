@@ -3,6 +3,19 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use sysinfo::{System, SystemExt, DiskExt, CpuExt};
 use anyhow::Result;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use uuid::Uuid;
+
+// File transfer state tracking
+struct FileTransferState {
+    filename: String,
+    total_size: u64,
+    chunk_size: u32,
+    expected_chunks: u32,
+    received_chunks: HashMap<u32, Vec<u8>>,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
