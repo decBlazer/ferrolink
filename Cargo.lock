@@ -22,10 +22,12 @@ name = "agent"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "clap",
  "serde_json",
  "shared",
  "sysinfo",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -177,6 +179,7 @@ dependencies = [
  "serde_json",
  "shared",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
