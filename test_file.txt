@@ -1,0 +1,14 @@
+Hello, FerroLink!
+
+This is a test file to demonstrate the file transfer functionality.
+It contains multiple lines and some special characters: !@#$%^&*()
+
+Line 1: Basic text
+Line 2: Numbers 123456789
+Line 3: Special chars: áéíóú ñ ü
+Line 4: Symbols: ★☆♪♫♥♦♣♠
+
+This file should be transferred successfully from client to agent
+using our chunked file transfer protocol with UUID tracking.
+
+End of test file. 
