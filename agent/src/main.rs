@@ -1,7 +1,8 @@
 use shared::{Message, SystemMetrics, MemoryInfo, DiskInfo, DEFAULT_HOST, DEFAULT_PORT};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio_util::codec::{LengthDelimitedCodec, FramedRead, FramedWrite};
+use bytes::Bytes;
+use futures::{StreamExt, SinkExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::net::tcp::WriteHalf;
 use sysinfo::{System, SystemExt, DiskExt, CpuExt};
 use anyhow::Result;
 use std::collections::HashMap;
@@ -9,6 +10,9 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 use clap::Parser;
+use tracing::{info, error};
+use tracing_subscriber::EnvFilter;
+use futures::Sink;
 
 #[derive(Parser)]
 #[command(name = "ferrolink-agent")]
@@ -34,15 +38,29 @@ struct FileTransferState {
     received_chunks: HashMap<u32, Vec<u8>>,
 }
 
+// Helper to send a Message via a framed writer
+async fn send_msg<W>(writer: &mut W, msg: &Message) -> Result<()>
+where
+    W: Sink<Bytes, Error = std::io::Error> + Unpin,
+{
+    let bytes = Bytes::from(serde_json::to_vec(msg)?);
+    writer.send(bytes).await.map_err(|e| e.into())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Initialize tracing subscriber (env-controlled log level)
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .init();
+
     let args = Args::parse();
     let addr = format!("{}:{}", args.host, args.port);
-    println!("Starting agent on {}", addr);
-    println!("Upload directory: {}", args.upload_dir);
+    info!("Starting agent on {}", addr);
+    info!("Upload directory: {}", args.upload_dir);
     
     let listener = TcpListener::bind(&addr).await?;
-    println!("Agent listening on {}", addr);
+    info!("Agent listening on {}", addr);
     
     // Shared state for file transfers across all client connections
     let file_transfers: Arc<Mutex<HashMap<Uuid, FileTransferState>>> = Arc::new(Mutex::new(HashMap::new()));
@@ -64,64 +82,47 @@ async fn main() -> Result<()> {
 }
 
 async fn handle_client(
-    mut stream: TcpStream, 
+    stream: TcpStream,
     file_transfers: Arc<Mutex<HashMap<Uuid, FileTransferState>>>,
-    upload_dir: Arc<String>
+    upload_dir: Arc<String>,
 ) -> Result<()> {
-    let (reader, mut writer) = stream.split();
-    let mut reader = BufReader::new(reader);
-    let mut line = String::new();
-    
-    loop {
-        line.clear();
-        match reader.read_line(&mut line).await? {
-            0 => break, // Client disconnected
-            _ => {
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
-                }
-                
-                match serde_json::from_str::<Message>(line) {
-                    Ok(Message::Ping) => {
-                        println!("Received ping");
-                        let response = serde_json::to_string(&Message::Pong)?;
-                        writer.write_all(response.as_bytes()).await?;
-                        writer.write_all(b"\n").await?;
-                        writer.flush().await?;
-                    }
-                    Ok(Message::GetSystemMetrics) => {
-                        println!("Received system metrics request");
-                        match collect_system_metrics().await {
-                            Ok(metrics) => {
-                                let response = serde_json::to_string(&Message::SystemMetrics(metrics))?;
-                                writer.write_all(response.as_bytes()).await?;
-                                writer.write_all(b"\n").await?;
-                                writer.flush().await?;
-                            }
-                            Err(e) => {
-                                eprintln!("Failed to collect system metrics: {}", e);
-                            }
-                        }
-                    }
-                    Ok(file_transfer_msg @ (Message::StartFileTransfer { .. } | 
-                                           Message::FileChunk { .. } | 
-                                           Message::CompleteFileTransfer { .. })) => {
-                        if let Err(e) = handle_file_transfer(file_transfer_msg, &mut writer, &file_transfers, &upload_dir).await {
-                            eprintln!("Failed to handle file transfer: {}", e);
-                        }
-                    }
-                    Ok(other) => {
-                        println!("Received unexpected message: {:?}", other);
+    let (read_half, write_half) = stream.into_split();
+    let mut reader = FramedRead::new(read_half, LengthDelimitedCodec::new());
+    let mut writer = FramedWrite::new(write_half, LengthDelimitedCodec::new());
+
+    while let Some(frame) = reader.next().await {
+        let bytes = frame?;
+        let msg: Message = serde_json::from_slice(&bytes)?;
+
+        match msg {
+            Message::Ping => {
+                info!("Received ping");
+                send_msg(&mut writer, &Message::Pong).await?;
+            }
+            Message::GetSystemMetrics => {
+                info!("Received system metrics request");
+                match collect_system_metrics().await {
+                    Ok(metrics) => {
+                        send_msg(&mut writer, &Message::SystemMetrics(metrics)).await?;
                     }
                     Err(e) => {
-                        eprintln!("Failed to parse message: {}", e);
+                        error!("Failed to collect system metrics: {}", e);
                     }
                 }
             }
+            file_transfer_msg @ (Message::StartFileTransfer { .. }
+                | Message::FileChunk { .. }
+                | Message::CompleteFileTransfer { .. }) => {
+                if let Err(e) = handle_file_transfer(file_transfer_msg, &mut writer, &file_transfers, &upload_dir).await {
+                    error!("Failed to handle file transfer: {}", e);
+                }
+            }
+            other => {
+                info!("Received unexpected message: {:?}", other);
+            }
         }
     }
-    
+
     Ok(())
 }
 
@@ -177,15 +178,18 @@ async fn collect_system_metrics() -> Result<SystemMetrics> {
     })
 }
 
-async fn handle_file_transfer(
+async fn handle_file_transfer<W>(
     message: Message,
-    writer: &mut WriteHalf<'_>,
+    writer: &mut W,
     file_transfers: &Arc<Mutex<HashMap<Uuid, FileTransferState>>>,
     upload_dir: &str,
-) -> Result<()> {
+) -> Result<()>
+where
+    W: Sink<Bytes, Error = std::io::Error> + Unpin,
+{
     match message {
         Message::StartFileTransfer { transfer_id, filename, total_size, chunk_size } => {
-            println!("Starting file transfer: {} ({} bytes)", filename, total_size);
+            info!("Starting file transfer: {} ({} bytes)", filename, total_size);
             
             // Calculate expected number of chunks
             let expected_chunks = ((total_size + chunk_size as u64 - 1) / chunk_size as u64) as u32;
@@ -206,17 +210,13 @@ async fn handle_file_transfer(
             }
             
             // Send ready response
-            let response = Message::FileTransferReady { transfer_id };
-            let response_json = serde_json::to_string(&response)?;
-            writer.write_all(response_json.as_bytes()).await?;
-            writer.write_all(b"\n").await?;
-            writer.flush().await?;
+            send_msg(writer, &Message::FileTransferReady { transfer_id }).await?;
             
-            println!("File transfer ready: {} (expecting {} chunks)", filename, expected_chunks);
+            info!("File transfer ready: {} (expecting {} chunks)", filename, expected_chunks);
         }
         
         Message::FileChunk { transfer_id, chunk_number, data, is_last_chunk: _ } => {
-            println!("Received chunk {} for transfer {}", chunk_number, transfer_id);
+            info!("Received chunk {} for transfer {}", chunk_number, transfer_id);
             
             let mut should_complete = false;
             let filename;
@@ -233,17 +233,13 @@ async fn handle_file_transfer(
                         should_complete = true;
                     }
                 } else {
-                    eprintln!("Received chunk for unknown transfer: {}", transfer_id);
+                    error!("Received chunk for unknown transfer: {}", transfer_id);
                     return Ok(());
                 }
             }
             
             // Send chunk received acknowledgment
-            let ack_response = Message::ChunkReceived { transfer_id, chunk_number };
-            let ack_json = serde_json::to_string(&ack_response)?;
-            writer.write_all(ack_json.as_bytes()).await?;
-            writer.write_all(b"\n").await?;
-            writer.flush().await?;
+            send_msg(writer, &Message::ChunkReceived { transfer_id, chunk_number }).await?;
             
             // If this was the last chunk or we have all chunks, complete the transfer
             if should_complete {
@@ -252,14 +248,14 @@ async fn handle_file_transfer(
         }
         
         Message::CompleteFileTransfer { transfer_id } => {
-            println!("Completing file transfer: {}", transfer_id);
+            info!("Completing file transfer: {}", transfer_id);
             
             let filename = {
                 let transfers = file_transfers.lock().await;
                 if let Some(transfer_state) = transfers.get(&transfer_id) {
                     transfer_state.filename.clone()
                 } else {
-                    eprintln!("Received complete request for unknown transfer: {}", transfer_id);
+                    error!("Received complete request for unknown transfer: {}", transfer_id);
                     return Ok(());
                 }
             };
@@ -268,20 +264,23 @@ async fn handle_file_transfer(
         }
         
         _ => {
-            eprintln!("Unexpected message in file transfer handler: {:?}", message);
+            error!("Unexpected message in file transfer handler: {:?}", message);
         }
     }
     
     Ok(())
 }
 
-async fn complete_file_transfer(
+async fn complete_file_transfer<W>(
     transfer_id: Uuid,
     filename: &str,
-    writer: &mut WriteHalf<'_>,
+    writer: &mut W,
     file_transfers: &Arc<Mutex<HashMap<Uuid, FileTransferState>>>,
     upload_dir: &str,
-) -> Result<()> {
+) -> Result<()>
+where
+    W: Sink<Bytes, Error = std::io::Error> + Unpin,
+{
     let transfer_result = {
         let mut transfers = file_transfers.lock().await;
         if let Some(transfer_state) = transfers.remove(&transfer_id) {
@@ -320,16 +319,12 @@ async fn complete_file_transfer(
     
     // Send completion response
     if let Some((success, error)) = transfer_result {
-        let response = Message::FileTransferComplete { transfer_id, success, error };
-        let response_json = serde_json::to_string(&response)?;
-        writer.write_all(response_json.as_bytes()).await?;
-        writer.write_all(b"\n").await?;
-        writer.flush().await?;
+        send_msg(writer, &Message::FileTransferComplete { transfer_id, success, error }).await?;
         
         if success {
-            println!("File transfer completed successfully: {}", filename);
+            info!("File transfer completed successfully: {}", filename);
         } else {
-            println!("File transfer failed: {}", filename);
+            info!("File transfer failed: {}", filename);
         }
     }
     
