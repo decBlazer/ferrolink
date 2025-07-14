@@ -18,3 +18,4 @@ bytes = "1.4"
 futures = "0.3"
 tokio-rustls = { version = "0.24" }
 rustls-pemfile = "1.0"
+rustls = { version = "0.21" }

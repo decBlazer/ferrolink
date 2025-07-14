@@ -13,6 +13,11 @@ use clap::Parser;
 use tracing::{info, error};
 use tracing_subscriber::EnvFilter;
 use futures::Sink;
+use std::fs::File;
+use std::io::BufReader;
+use rustls::{Certificate, PrivateKey, ServerConfig};
+use tokio_rustls::TlsAcceptor;
+use rustls_pemfile::{certs, pkcs8_private_keys, rsa_private_keys};
 
 #[derive(Parser)]
 #[command(name = "ferrolink-agent")]
@@ -26,6 +31,14 @@ struct Args {
     
     #[arg(short, long, default_value = "uploads")]
     upload_dir: String,
+
+    /// Path to TLS certificate PEM file
+    #[arg(long, default_value = "cert.pem")]
+    cert_path: String,
+
+    /// Path to TLS private key PEM file
+    #[arg(long, default_value = "key.pem")]
+    key_path: String,
 }
 
 // File transfer state tracking
@@ -47,6 +60,31 @@ where
     writer.send(bytes).await.map_err(|e| e.into())
 }
 
+// Helper to load certificates
+fn load_certs(path: &str) -> anyhow::Result<Vec<Certificate>> {
+    let mut reader = BufReader::new(File::open(path)?);
+    let certs = certs(&mut reader)?
+        .into_iter()
+        .map(Certificate)
+        .collect();
+    Ok(certs)
+}
+
+// Helper to load private key (PKCS8 or RSA)
+fn load_private_key(path: &str) -> anyhow::Result<PrivateKey> {
+    let mut reader = BufReader::new(File::open(path)?);
+    // Try pkcs8 first
+    if let Some(key) = pkcs8_private_keys(&mut reader)?.into_iter().next() {
+        return Ok(PrivateKey(key));
+    }
+    // Rewind and try RSA
+    let mut reader = BufReader::new(File::open(path)?);
+    if let Some(key) = rsa_private_keys(&mut reader)?.into_iter().next() {
+        return Ok(PrivateKey(key));
+    }
+    anyhow::bail!("No private key found in {}", path)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize tracing subscriber (env-controlled log level)
@@ -59,34 +97,54 @@ async fn main() -> Result<()> {
     info!("Starting agent on {}", addr);
     info!("Upload directory: {}", args.upload_dir);
     
+    // Build TLS acceptor
+    let certs = load_certs(&args.cert_path)?;
+    let key = load_private_key(&args.key_path)?;
+    let tls_config = ServerConfig::builder()
+        .with_safe_defaults()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)?;
+    let acceptor = TlsAcceptor::from(Arc::new(tls_config));
+
     let listener = TcpListener::bind(&addr).await?;
-    info!("Agent listening on {}", addr);
+    info!("Agent listening with TLS on {}", addr);
     
     // Shared state for file transfers across all client connections
     let file_transfers: Arc<Mutex<HashMap<Uuid, FileTransferState>>> = Arc::new(Mutex::new(HashMap::new()));
     let upload_dir = Arc::new(args.upload_dir);
     
     loop {
-        let (stream, peer_addr) = listener.accept().await?;
-        println!("New client connected: {}", peer_addr);
+        let (tcp_stream, peer_addr) = listener.accept().await?;
+        let acceptor = acceptor.clone();
+        info!("New client connected: {}", peer_addr);
         
         let file_transfers_clone = Arc::clone(&file_transfers);
         let upload_dir_clone = Arc::clone(&upload_dir);
         tokio::spawn(async move {
-            if let Err(e) = handle_client(stream, file_transfers_clone, upload_dir_clone).await {
-                eprintln!("Error handling client {}: {}", peer_addr, e);
+            let tls_stream = match acceptor.accept(tcp_stream).await {
+                Ok(s) => s,
+                Err(e) => {
+                    error!("TLS handshake failed with {}: {}", peer_addr, e);
+                    return;
+                }
+            };
+            if let Err(e) = handle_client(tls_stream, file_transfers_clone, upload_dir_clone).await {
+                error!("Error handling client {}: {}", peer_addr, e);
             }
-            println!("Client {} disconnected", peer_addr);
+            info!("Client {} disconnected", peer_addr);
         });
     }
 }
 
-async fn handle_client(
-    stream: TcpStream,
+async fn handle_client<S>(
+    stream: S,
     file_transfers: Arc<Mutex<HashMap<Uuid, FileTransferState>>>,
     upload_dir: Arc<String>,
-) -> Result<()> {
-    let (read_half, write_half) = stream.into_split();
+) -> Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let (read_half, write_half) = tokio::io::split(stream);
     let mut reader = FramedRead::new(read_half, LengthDelimitedCodec::new());
     let mut writer = FramedWrite::new(write_half, LengthDelimitedCodec::new());
 

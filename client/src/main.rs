@@ -4,11 +4,17 @@ use bytes::Bytes;
 use futures::{StreamExt, SinkExt};
 use tracing::{info, error};
 use tracing_subscriber::EnvFilter;
+use rustls::{ClientConfig, RootCertStore};
+use tokio_rustls::{TlsConnector, rustls::client::ServerName};
+use std::sync::Arc;
+use std::fs::File;
+use std::io::BufReader;
+use rustls_pemfile::certs;
+use futures::Sink;
 use tokio::net::TcpStream;
 use clap::{Parser, Subcommand};
 use uuid::Uuid;
 use std::path::PathBuf;
-use futures::Sink;
 
 #[derive(Parser)]
 #[command(name = "ferrolink-client")]
@@ -19,6 +25,10 @@ struct Args {
     
     #[arg(short, long, default_value_t = DEFAULT_PORT)]
     port: u16,
+
+    /// Path to server certificate (for dev self-signed)
+    #[arg(long, default_value = "cert.pem")]
+    cert_path: String,
     
     #[command(subcommand)]
     command: Commands,
@@ -49,14 +59,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args = Args::parse();
     let addr = format!("{}:{}", args.host, args.port);
+
+    // Build TLS connector once
+    let connector = build_tls_connector(&args.cert_path)?;
     
     match args.command {
-        Commands::Ping => ping_agent(&addr).await?,
-        Commands::Monitor => get_system_metrics(&addr).await?,
-        Commands::SendFile { file, chunk_size } => send_file(&addr, &file, chunk_size).await?,
+        Commands::Ping => ping_agent(&addr, &connector, &args.host).await?,
+        Commands::Monitor => get_system_metrics(&addr, &connector, &args.host).await?,
+        Commands::SendFile { file, chunk_size } => send_file(&addr, &connector, &args.host, &file, chunk_size).await?,
     }
     
          Ok(())
+}
+
+fn build_tls_connector(cert_path: &str) -> Result<TlsConnector, Box<dyn std::error::Error>> {
+    let mut root_store = RootCertStore::empty();
+    let mut reader = BufReader::new(File::open(cert_path)?);
+    let certs_vec = certs(&mut reader)?;
+    for cert in certs_vec {
+        root_store.add(&rustls::Certificate(cert))?;
+    }
+    let config = ClientConfig::builder()
+        .with_safe_defaults()
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
+    Ok(TlsConnector::from(Arc::new(config)))
 }
 
 // Helper to send message via framed writer
@@ -68,11 +95,13 @@ where
     writer.send(bytes).await
 }
 
-async fn ping_agent(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn ping_agent(addr: &str, connector: &TlsConnector, host: &str) -> Result<(), Box<dyn std::error::Error>> {
     info!("Connecting to agent at {}", addr);
 
-    let stream = TcpStream::connect(addr).await?;
-    let (read_half, write_half) = stream.into_split();
+    let tcp = TcpStream::connect(addr).await?;
+    let server_name = ServerName::try_from(host)?;
+    let stream = connector.connect(server_name, tcp).await?;
+    let (read_half, write_half) = tokio::io::split(stream);
     let mut reader = FramedRead::new(read_half, LengthDelimitedCodec::new());
     let mut writer = FramedWrite::new(write_half, LengthDelimitedCodec::new());
 
@@ -88,16 +117,22 @@ async fn ping_agent(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
             Ok(other) => info!("Unexpected response: {:?}", other),
             Err(e) => error!("Failed to parse response: {}", e),
         }
+
+        // Gracefully close the write side so the server can flush without hitting EOF
+        writer.close().await.ok();
+        // Give the peer a moment to acknowledge before we drop the socket
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 
     Ok(())
 }
 
-async fn get_system_metrics(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn get_system_metrics(addr: &str, connector: &TlsConnector, host: &str) -> Result<(), Box<dyn std::error::Error>> {
     info!("Connecting to agent at {}", addr);
 
-    let stream = TcpStream::connect(addr).await?;
-    let (read_half, write_half) = stream.into_split();
+    let tcp = TcpStream::connect(addr).await?;
+    let stream = connector.connect(ServerName::try_from(host)?, tcp).await?;
+    let (read_half, write_half) = tokio::io::split(stream);
     let mut reader = FramedRead::new(read_half, LengthDelimitedCodec::new());
     let mut writer = FramedWrite::new(write_half, LengthDelimitedCodec::new());
 
@@ -156,7 +191,7 @@ fn display_system_metrics(metrics: &SystemMetrics) {
     println!();
 }
 
-async fn send_file(addr: &str, file_path: &PathBuf, chunk_size: u32) -> Result<(), Box<dyn std::error::Error>> {
+async fn send_file(addr: &str, connector: &TlsConnector, host: &str, file_path: &PathBuf, chunk_size: u32) -> Result<(), Box<dyn std::error::Error>> {
     info!("Connecting to agent at {}", addr);
 
     // Check if file exists and get metadata
@@ -170,8 +205,9 @@ async fn send_file(addr: &str, file_path: &PathBuf, chunk_size: u32) -> Result<(
     info!("Preparing to send file: {} ({} bytes)", filename, file_size);
 
     // Connect to agent
-    let stream = TcpStream::connect(addr).await?;
-    let (read_half, write_half) = stream.into_split();
+    let tcp = TcpStream::connect(addr).await?;
+    let stream = connector.connect(ServerName::try_from(host)?, tcp).await?;
+    let (read_half, write_half) = tokio::io::split(stream);
     let mut reader = FramedRead::new(read_half, LengthDelimitedCodec::new());
     let mut writer = FramedWrite::new(write_half, LengthDelimitedCodec::new());
 
