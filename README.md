@@ -176,5 +176,3 @@ This project demonstrates:
 - **Error Handling**: Robust error handling with anyhow/thiserror
 - **CLI Design**: User-friendly command-line interfaces
 - **Async Programming**: Tokio for concurrent request handling
-
-Perfect for showcasing skills for software engineering internships!
