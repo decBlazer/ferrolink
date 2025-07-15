@@ -1,0 +1,24 @@
+version: "3.8"
+
+services:
+  agent:
+    build: .
+    container_name: ferrolink-agent
+    environment:
+      - RUST_LOG=info
+    volumes:
+      - ./uploads:/app/uploads
+      - ./cert.pem:/app/cert.pem:ro
+      - ./key.pem:/app/key.pem:ro
+    ports:
+      - "8080:8080"  # TLS agent port
+      - "9090:9090"  # Prometheus metrics
+
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on:
+      - agent 

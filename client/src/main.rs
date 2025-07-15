@@ -29,6 +29,10 @@ struct Args {
     /// Path to server certificate (for dev self-signed)
     #[arg(long, default_value = "cert.pem")]
     cert_path: String,
+
+    /// Authentication token to present to the agent
+    #[arg(long)]
+    token: Option<String>,
     
     #[command(subcommand)]
     command: Commands,
@@ -48,6 +52,14 @@ enum Commands {
         #[arg(long, default_value_t = 8192)]
         chunk_size: u32,
     },
+    /// Wake a machine via Wake-on-LAN magic packet
+    Wol {
+        /// MAC address in format AA:BB:CC:DD:EE:FF
+        mac: String,
+        /// UDP port to send packet on (default 9)
+        #[arg(long, default_value_t = 9)]
+        port: u16,
+    },
 }
 
 #[tokio::main]
@@ -64,9 +76,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let connector = build_tls_connector(&args.cert_path)?;
     
     match args.command {
-        Commands::Ping => ping_agent(&addr, &connector, &args.host).await?,
-        Commands::Monitor => get_system_metrics(&addr, &connector, &args.host).await?,
-        Commands::SendFile { file, chunk_size } => send_file(&addr, &connector, &args.host, &file, chunk_size).await?,
+        Commands::Ping => ping_agent(&addr, &connector, &args.host, &args.token).await?,
+        Commands::Monitor => get_system_metrics(&addr, &connector, &args.host, &args.token).await?,
+        Commands::SendFile { file, chunk_size } => send_file(&addr, &connector, &args.host, &file, chunk_size, &args.token).await?,
+        Commands::Wol { mac, port } => send_magic_packet(&mac, port).await?,
     }
     
          Ok(())
@@ -95,7 +108,7 @@ where
     writer.send(bytes).await
 }
 
-async fn ping_agent(addr: &str, connector: &TlsConnector, host: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn ping_agent(addr: &str, connector: &TlsConnector, host: &str, token: &Option<String>) -> Result<(), Box<dyn std::error::Error>> {
     info!("Connecting to agent at {}", addr);
 
     let tcp = TcpStream::connect(addr).await?;
@@ -104,6 +117,17 @@ async fn ping_agent(addr: &str, connector: &TlsConnector, host: &str) -> Result<
     let (read_half, write_half) = tokio::io::split(stream);
     let mut reader = FramedRead::new(read_half, LengthDelimitedCodec::new());
     let mut writer = FramedWrite::new(write_half, LengthDelimitedCodec::new());
+
+    // Authentication if required
+    if let Some(t) = token {
+        send_msg(&mut writer, &Message::AuthRequest { token: t.clone() }).await?;
+        let auth_frame = reader.next().await.ok_or("No auth response")??;
+        match serde_json::from_slice::<Message>(&auth_frame)? {
+            Message::AuthOk => info!("Authenticated successfully"),
+            Message::AuthErr { reason } => return Err(format!("Authentication failed: {}", reason).into()),
+            other => return Err(format!("Unexpected auth response: {:?}", other).into()),
+        }
+    }
 
     // Send ping
     info!("Sending ping...");
@@ -127,7 +151,7 @@ async fn ping_agent(addr: &str, connector: &TlsConnector, host: &str) -> Result<
     Ok(())
 }
 
-async fn get_system_metrics(addr: &str, connector: &TlsConnector, host: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn get_system_metrics(addr: &str, connector: &TlsConnector, host: &str, token: &Option<String>) -> Result<(), Box<dyn std::error::Error>> {
     info!("Connecting to agent at {}", addr);
 
     let tcp = TcpStream::connect(addr).await?;
@@ -135,6 +159,17 @@ async fn get_system_metrics(addr: &str, connector: &TlsConnector, host: &str) ->
     let (read_half, write_half) = tokio::io::split(stream);
     let mut reader = FramedRead::new(read_half, LengthDelimitedCodec::new());
     let mut writer = FramedWrite::new(write_half, LengthDelimitedCodec::new());
+
+    // Authentication if required
+    if let Some(t) = token {
+        send_msg(&mut writer, &Message::AuthRequest { token: t.clone() }).await?;
+        let auth_frame = reader.next().await.ok_or("No auth response")??;
+        match serde_json::from_slice::<Message>(&auth_frame)? {
+            Message::AuthOk => info!("Authenticated successfully"),
+            Message::AuthErr { reason } => return Err(format!("Authentication failed: {}", reason).into()),
+            other => return Err(format!("Unexpected auth response: {:?}", other).into()),
+        }
+    }
 
     // Send system metrics request
     info!("Requesting system metrics...");
@@ -191,7 +226,7 @@ fn display_system_metrics(metrics: &SystemMetrics) {
     println!();
 }
 
-async fn send_file(addr: &str, connector: &TlsConnector, host: &str, file_path: &PathBuf, chunk_size: u32) -> Result<(), Box<dyn std::error::Error>> {
+async fn send_file(addr: &str, connector: &TlsConnector, host: &str, file_path: &PathBuf, chunk_size: u32, token: &Option<String>) -> Result<(), Box<dyn std::error::Error>> {
     info!("Connecting to agent at {}", addr);
 
     // Check if file exists and get metadata
@@ -210,6 +245,17 @@ async fn send_file(addr: &str, connector: &TlsConnector, host: &str, file_path: 
     let (read_half, write_half) = tokio::io::split(stream);
     let mut reader = FramedRead::new(read_half, LengthDelimitedCodec::new());
     let mut writer = FramedWrite::new(write_half, LengthDelimitedCodec::new());
+
+    // Authentication if required
+    if let Some(t) = token {
+        send_msg(&mut writer, &Message::AuthRequest { token: t.clone() }).await?;
+        let auth_frame = reader.next().await.ok_or("No auth response")??;
+        match serde_json::from_slice::<Message>(&auth_frame)? {
+            Message::AuthOk => info!("Authenticated successfully"),
+            Message::AuthErr { reason } => return Err(format!("Authentication failed: {}", reason).into()),
+            other => return Err(format!("Unexpected auth response: {:?}", other).into()),
+        }
+    }
 
     // Generate transfer ID
     let transfer_id = Uuid::new_v4();
@@ -284,5 +330,33 @@ async fn send_file(addr: &str, connector: &TlsConnector, host: &str, file_path: 
         other => info!("Unexpected response: {:?}", other),
     }
 
+    Ok(())
+}
+
+async fn send_magic_packet(mac_str: &str, port: u16) -> Result<(), Box<dyn std::error::Error>> {
+    // Parse MAC address (AA:BB:CC:DD:EE:FF)
+    let bytes: Vec<u8> = mac_str
+        .split(|c| c == ':' || c == '-')
+        .map(|s| u8::from_str_radix(s, 16))
+        .collect::<Result<_, _>>()?;
+    if bytes.len() != 6 {
+        return Err("MAC must have 6 bytes".into());
+    }
+    let mut packet = Vec::with_capacity(6 + 16 * 6);
+    // 6 x 0xFF
+    packet.extend_from_slice(&[0xFF; 6]);
+    // 16 repetitions of MAC
+    for _ in 0..16 {
+        packet.extend_from_slice(&bytes);
+    }
+     
+    let addr = format!("255.255.255.255:{}", port);
+    let socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await?;
+    socket.set_broadcast(true)?;
+    
+    info!("Sending Wake-on-LAN packet to {} on port {}", mac_str, port);
+    socket.send_to(&packet, &addr).await?;
+    info!("Wake-on-LAN packet sent successfully!");
+    
     Ok(())
 }

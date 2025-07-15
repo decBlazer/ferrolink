@@ -1,0 +1,11 @@
+# Ignore unnecessary files for Docker context
+.git
+.target
+target
+**/target
+# Intentionally keep Dockerfile
+docker-compose.yml
+*.pem
+*.key
+*.crt
+uploads/ 

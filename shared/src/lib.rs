@@ -39,6 +39,10 @@ pub enum Message {
         success: bool,
         error: Option<String>,
     },
+    // Authentication messages
+    AuthRequest { token: String },
+    AuthOk,
+    AuthErr { reason: String },
 }
 
 // Data structure for system monitoring information

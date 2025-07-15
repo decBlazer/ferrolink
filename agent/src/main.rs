@@ -2,7 +2,7 @@ use shared::{Message, SystemMetrics, MemoryInfo, DiskInfo, DEFAULT_HOST, DEFAULT
 use tokio_util::codec::{LengthDelimitedCodec, FramedRead, FramedWrite};
 use bytes::Bytes;
 use futures::{StreamExt, SinkExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 use sysinfo::{System, SystemExt, DiskExt, CpuExt};
 use anyhow::Result;
 use std::collections::HashMap;
@@ -18,6 +18,11 @@ use std::io::BufReader;
 use rustls::{Certificate, PrivateKey, ServerConfig};
 use tokio_rustls::TlsAcceptor;
 use rustls_pemfile::{certs, pkcs8_private_keys, rsa_private_keys};
+// Add Prometheus / Hyper imports
+use hyper::{Body, Request, Response, Server};
+use hyper::service::{make_service_fn, service_fn};
+use once_cell::sync::Lazy;
+use prometheus::{Encoder, TextEncoder, IntCounter, register_int_counter};
 
 #[derive(Parser)]
 #[command(name = "ferrolink-agent")]
@@ -39,6 +44,14 @@ struct Args {
     /// Path to TLS private key PEM file
     #[arg(long, default_value = "key.pem")]
     key_path: String,
+
+    /// Authentication token required from clients. If omitted, authentication is disabled.
+    #[arg(long, env = "FERROLINK_TOKEN")]
+    token: Option<String>,
+
+    /// Port for Prometheus `/metrics` endpoint
+    #[arg(long, default_value_t = 9090)]
+    metrics_port: u16,
 }
 
 // File transfer state tracking
@@ -85,6 +98,42 @@ fn load_private_key(path: &str) -> anyhow::Result<PrivateKey> {
     anyhow::bail!("No private key found in {}", path)
 }
 
+// ===================== Prometheus Metrics =====================
+static CONNECTIONS_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!("connections_total", "Total TCP client connections").unwrap()
+});
+static AUTH_FAILURES_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!("auth_failures_total", "Failed client authentications").unwrap()
+});
+static FILE_TRANSFERS_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!("file_transfers_total", "Completed file transfers").unwrap()
+});
+// =============================================================
+
+async fn start_metrics_server(addr: std::net::SocketAddr) -> Result<(), hyper::Error> {
+    let make_svc = make_service_fn(|_conn| async {
+        Ok::<_, hyper::Error>(service_fn(|req: Request<Body>| async move {
+            if req.uri().path() == "/metrics" {
+                let encoder = TextEncoder::new();
+                let metric_families = prometheus::gather();
+                let mut buffer = Vec::new();
+                encoder.encode(&metric_families, &mut buffer).unwrap();
+                Ok::<_, hyper::Error>(Response::builder()
+                    .status(200)
+                    .header("Content-Type", encoder.format_type())
+                    .body(Body::from(buffer))
+                    .unwrap())
+            } else {
+                Ok::<_, hyper::Error>(Response::builder()
+                    .status(404)
+                    .body(Body::from("Not Found"))
+                    .unwrap())
+            }
+        }))
+    });
+    Server::bind(&addr).serve(make_svc).await
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize tracing subscriber (env-controlled log level)
@@ -113,13 +162,23 @@ async fn main() -> Result<()> {
     let file_transfers: Arc<Mutex<HashMap<Uuid, FileTransferState>>> = Arc::new(Mutex::new(HashMap::new()));
     let upload_dir = Arc::new(args.upload_dir);
     
+    // Spawn Prometheus metrics endpoint
+    let metrics_addr = format!("0.0.0.0:{}", args.metrics_port).parse().expect("metrics addr");
+    tokio::spawn(async move {
+        if let Err(e) = start_metrics_server(metrics_addr).await {
+            eprintln!("Metrics server failed: {}", e);
+        }
+    });
+
     loop {
         let (tcp_stream, peer_addr) = listener.accept().await?;
         let acceptor = acceptor.clone();
         info!("New client connected: {}", peer_addr);
+        CONNECTIONS_TOTAL.inc();
         
         let file_transfers_clone = Arc::clone(&file_transfers);
         let upload_dir_clone = Arc::clone(&upload_dir);
+        let expected_token = args.token.clone();
         tokio::spawn(async move {
             let tls_stream = match acceptor.accept(tcp_stream).await {
                 Ok(s) => s,
@@ -128,7 +187,7 @@ async fn main() -> Result<()> {
                     return;
                 }
             };
-            if let Err(e) = handle_client(tls_stream, file_transfers_clone, upload_dir_clone).await {
+            if let Err(e) = handle_client(tls_stream, file_transfers_clone, upload_dir_clone, expected_token).await {
                 error!("Error handling client {}: {}", peer_addr, e);
             }
             info!("Client {} disconnected", peer_addr);
@@ -140,6 +199,7 @@ async fn handle_client<S>(
     stream: S,
     file_transfers: Arc<Mutex<HashMap<Uuid, FileTransferState>>>,
     upload_dir: Arc<String>,
+    expected_token: Option<String>,
 ) -> Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -147,6 +207,35 @@ where
     let (read_half, write_half) = tokio::io::split(stream);
     let mut reader = FramedRead::new(read_half, LengthDelimitedCodec::new());
     let mut writer = FramedWrite::new(write_half, LengthDelimitedCodec::new());
+
+    // ------------------------------------------------------------
+    // Authentication handshake (if token required)
+    // ------------------------------------------------------------
+    if let Some(expected) = expected_token {
+        // First message must be AuthRequest
+        match reader.next().await {
+            Some(frame_res) => {
+                let bytes = frame_res?;
+                let msg: Message = serde_json::from_slice(&bytes)?;
+                match msg {
+                    Message::AuthRequest { token } if token == expected => {
+                        send_msg(&mut writer, &Message::AuthOk).await?;
+                        // proceed with normal handling
+                    }
+                    _ => {
+                        AUTH_FAILURES_TOTAL.inc();
+                        send_msg(&mut writer, &Message::AuthErr { reason: "Invalid token".into() }).await.ok();
+                        return Ok(());
+                    }
+                }
+            }
+            None => {
+                // Connection closed before auth
+                AUTH_FAILURES_TOTAL.inc();
+                return Ok(());
+            }
+        }
+    }
 
     while let Some(frame) = reader.next().await {
         let bytes = frame?;
@@ -381,6 +470,7 @@ where
         
         if success {
             info!("File transfer completed successfully: {}", filename);
+            FILE_TRANSFERS_TOTAL.inc();
         } else {
             info!("File transfer failed: {}", filename);
         }
