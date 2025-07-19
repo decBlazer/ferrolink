@@ -15,6 +15,7 @@ use tokio::net::TcpStream;
 use clap::{Parser, Subcommand};
 use uuid::Uuid;
 use std::path::PathBuf;
+use sha2::{Sha256, Digest};
 
 #[derive(Parser)]
 #[command(name = "ferrolink-client")]
@@ -66,6 +67,14 @@ enum Commands {
         #[arg(long, default_value_t = 2)]
         interval: u64,
     },
+    /// Sync a local file to the agent (uploads dir) only if contents changed
+    Sync {
+        /// Path of the file to sync
+        file: PathBuf,
+        /// Chunk size for upload (default 8192)
+        #[arg(long, default_value_t = 8192)]
+        chunk_size: u32,
+    },
     /// Execute a command on the remote agent
     Exec {
         /// Program to execute (e.g. "ls")
@@ -96,6 +105,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Wol { mac, port } => send_magic_packet(&mac, port).await?,
         Commands::Exec { program, args: cmd_args } => exec_command(&addr, &connector, &args.host, &program, &cmd_args, &args.token).await?,
         Commands::Watch { interval } => watch_metrics(&addr, &connector, &args.host, interval, &args.token).await?,
+        Commands::Sync { file, chunk_size } => sync_file(&addr, &connector, &args.host, &file, chunk_size, &args.token).await?,
     }
     
          Ok(())
@@ -471,4 +481,68 @@ async fn watch_metrics(addr: &str, connector: &TlsConnector, host: &str, interva
 
         sleep(Duration::from_secs(interval)).await;
     }
+}
+
+async fn compute_sha256(path: &PathBuf) -> Result<String, Box<dyn std::error::Error>> {
+    use tokio::io::AsyncReadExt;
+    let mut file = tokio::fs::File::open(path).await?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = file.read(&mut buf).await?;
+        if n == 0 { break; }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+async fn sync_file(addr: &str, connector: &TlsConnector, host: &str, file_path: &PathBuf, chunk_size: u32, token: &Option<String>) -> Result<(), Box<dyn std::error::Error>> {
+    // Compute local hash
+    let local_hash = compute_sha256(file_path).await?;
+
+    let filename = file_path.file_name().ok_or("Invalid filename")?.to_string_lossy().to_string();
+
+    // Connect to agent for hash comparison
+    let tcp = TcpStream::connect(addr).await?;
+    let stream = connector.connect(ServerName::try_from(host)?, tcp).await?;
+    let (read_half, write_half) = tokio::io::split(stream);
+    let mut reader = FramedRead::new(read_half, LengthDelimitedCodec::new());
+    let mut writer = FramedWrite::new(write_half, LengthDelimitedCodec::new());
+
+    if let Some(t) = token {
+        send_msg(&mut writer, &Message::AuthRequest { token: t.clone() }).await?;
+        let auth_frame = reader.next().await.ok_or("No auth response")??;
+        match serde_json::from_slice::<Message>(&auth_frame)? {
+            Message::AuthOk => info!("Authenticated successfully"),
+            Message::AuthErr { reason } => return Err(format!("Authentication failed: {}", reason).into()),
+            other => return Err(format!("Unexpected auth response: {:?}", other).into()),
+        }
+    }
+
+    // Send FileHashRequest
+    send_msg(&mut writer, &Message::FileHashRequest { filename: filename.clone() }).await?;
+
+    let resp_frame = reader.next().await.ok_or("No hash response from agent")??;
+    let remote_hash_opt = match serde_json::from_slice::<Message>(&resp_frame)? {
+        Message::FileHashResponse { filename: _, hash } => hash,
+        other => return Err(format!("Unexpected response: {:?}", other).into()),
+    };
+
+    if let Some(remote_hash) = remote_hash_opt {
+        if remote_hash == local_hash {
+            println!("✅ File {} is already up to date on agent.", filename);
+            return Ok(());
+        } else {
+            println!("🔄 File differs (remote hash mismatch). Uploading new version...");
+        }
+    } else {
+        println!("📄 File not present on agent. Uploading...");
+    }
+
+    // Drop hash connection before uploading (or we could reuse but easier to drop)
+    drop(reader);
+    drop(writer);
+
+    // Reuse existing send_file helper to perform transfer
+    send_file(addr, connector, host, file_path, chunk_size, token).await
 }

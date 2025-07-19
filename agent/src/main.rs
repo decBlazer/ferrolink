@@ -5,6 +5,8 @@ use futures::{StreamExt, SinkExt};
 use tokio::net::TcpListener;
 use tokio::process::Command as TokioCommand;
 use sysinfo::{System, SystemExt, DiskExt, CpuExt};
+use sha2::{Sha256, Digest};
+use hex;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -292,6 +294,23 @@ where
                         };
                         send_msg(&mut writer, &result_msg).await.ok();
                     }
+                }
+            }
+            Message::FileHashRequest { filename } => {
+                let full_path = format!("{}/{}", upload_dir, filename);
+                let hash_opt = match tokio::fs::read(&full_path).await {
+                    Ok(bytes) => {
+                        let mut hasher = Sha256::new();
+                        hasher.update(&bytes);
+                        let result = hasher.finalize();
+                        Some(hex::encode(result))
+                    }
+                    Err(_) => None, // file missing or unreadable -- treat as not existing
+                };
+
+                let resp = Message::FileHashResponse { filename, hash: hash_opt };
+                if let Err(e) = send_msg(&mut writer, &resp).await {
+                    error!("Failed to send FileHashResponse: {}", e);
                 }
             }
             file_transfer_msg @ (Message::StartFileTransfer { .. }

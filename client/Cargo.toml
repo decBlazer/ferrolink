@@ -17,3 +17,5 @@ futures = "0.3"
 tokio-rustls = { version = "0.24" }
 rustls-pemfile = "1.0"
 rustls = { version = "0.21" }
+sha2 = "0.10"
+hex = "0.4"

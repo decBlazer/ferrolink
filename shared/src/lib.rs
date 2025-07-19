@@ -39,6 +39,16 @@ pub enum Message {
         success: bool,
         error: Option<String>,
     },
+    // File synchronization: hash check
+    /// Request SHA-256 hash of a file already present on the agent (its upload directory)
+    FileHashRequest {
+        filename: String,
+    },
+    /// Response with the hex-encoded SHA-256 hash if the file exists; `None` if missing
+    FileHashResponse {
+        filename: String,
+        hash: Option<String>,
+    },
     // Authentication messages
     AuthRequest { token: String },
     AuthOk,
