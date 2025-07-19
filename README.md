@@ -11,15 +11,15 @@ A secure, extensible client-server system for remote desktop monitoring and cont
     CLI Interface                           Always-on service
 ```
 
-## ✨ Features (Phase 1 - MVP)
+## Features
 
-- **📊 Real-time System Monitoring**: CPU usage, memory consumption
-- **🔗 TCP Communication**: JSON-based protocol over TCP
-- **⚡ Async Performance**: Built with Tokio for concurrent client handling
-- **🖥️ CLI Interface**: Clean command-line interface with clap
-- **📝 Structured Logging**: Comprehensive logging with tracing
+- **Real-time System Monitoring**: CPU usage, memory consumption
+- **TCP Communication**: JSON-based protocol over TCP
+- **Async Performance**: Built with Tokio for concurrent client handling
+- **🖥CLI Interface**: Clean command-line interface with clap
+- **Structured Logging**: Comprehensive logging with tracing
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Prerequisites
 - Rust 1.70+ with Cargo
@@ -65,7 +65,7 @@ cargo build -p shared   # Common library
 ./target/release/client --host 192.168.1.100 monitor
 ```
 
-## 📋 Command Reference
+## Command Reference
 
 ### Agent Commands
 ```bash
@@ -91,7 +91,7 @@ COMMANDS:
     watch     Monitor system metrics continuously
 ```
 
-## 🔧 Development
+## Development
 
 ### Project Structure
 ```
@@ -118,7 +118,7 @@ ferrolink/
 - **Logging**: tracing for structured logging
 - **Serialization**: serde + serde_json for message protocol
 
-## 🎯 Roadmap
+## Roadmap
 
 ### Phase 2: Advanced Features
 - [ ] Remote command execution
@@ -132,7 +132,7 @@ ferrolink/
 - [ ] Plugin architecture
 - [ ] Performance dashboard
 
-## 🤝 Usage Examples
+## Usage Examples
 
 ### Basic Monitoring
 ```bash
@@ -167,7 +167,7 @@ Output:
    Memory: 8435 / 16384 MB (51.5%)
 ```
 
-## 🎓 Learning Objectives
+## Learning Objectives
 
 This project demonstrates:
 - **Distributed Systems**: Client-server architecture with async networking
