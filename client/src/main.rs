@@ -16,6 +16,8 @@ use clap::{Parser, Subcommand};
 use uuid::Uuid;
 use std::path::PathBuf;
 use sha2::{Sha256, Digest};
+use ratatui::{Terminal, backend::CrosstermBackend, widgets::{Block, Borders, Paragraph}, layout::{Layout, Constraint, Direction}, style::{Style, Color}};
+use crossterm::{terminal::{enable_raw_mode, disable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen}, execute, event::{self, Event, KeyCode}};
 
 #[derive(Parser)]
 #[command(name = "ferrolink-client")]
@@ -67,6 +69,12 @@ enum Commands {
         #[arg(long, default_value_t = 2)]
         interval: u64,
     },
+    /// Terminal UI showing live system metrics
+    Tui {
+        /// Refresh interval in seconds (default 1)
+        #[arg(long, default_value_t = 1)]
+        interval: u64,
+    },
     /// Sync a local file to the agent (uploads dir) only if contents changed
     Sync {
         /// Path of the file to sync
@@ -106,6 +114,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Exec { program, args: cmd_args } => exec_command(&addr, &connector, &args.host, &program, &cmd_args, &args.token).await?,
         Commands::Watch { interval } => watch_metrics(&addr, &connector, &args.host, interval, &args.token).await?,
         Commands::Sync { file, chunk_size } => sync_file(&addr, &connector, &args.host, &file, chunk_size, &args.token).await?,
+        Commands::Tui { interval } => run_tui(&addr, &connector, &args.host, interval, &args.token).await?,
     }
     
          Ok(())
@@ -545,4 +554,116 @@ async fn sync_file(addr: &str, connector: &TlsConnector, host: &str, file_path: 
 
     // Reuse existing send_file helper to perform transfer
     send_file(addr, connector, host, file_path, chunk_size, token).await
+}
+
+async fn run_tui(addr: &str, connector: &TlsConnector, host: &str, interval_secs: u64, token: &Option<String>) -> Result<(), Box<dyn std::error::Error>> {
+    use tokio::sync::watch;
+    use tokio::time::{sleep, Duration};
+
+    // Channel to pass metrics to UI
+    let (tx, mut rx) = watch::channel(None::<SystemMetrics>);
+
+    // ----------------- Networking task -----------------
+    let addr_owned = addr.to_string();
+    let host_owned = host.to_string();
+    let connector_cloned = connector.clone();
+    let token_clone = token.clone();
+    tokio::spawn(async move {
+        loop {
+            match fetch_metrics_once(&addr_owned, &connector_cloned, &host_owned, &token_clone).await {
+                Ok(metrics) => {
+                    let _ = tx.send(Some(metrics));
+                }
+                Err(e) => {
+                    eprintln!("Failed to fetch metrics: {}", e);
+                }
+            }
+            sleep(Duration::from_secs(interval_secs)).await;
+        }
+    });
+
+    // ----------------- UI setup -----------------
+    enable_raw_mode()?;
+    let mut stdout = std::io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    // UI Event loop
+    loop {
+        // Draw frame
+        let latest = rx.borrow().clone();
+        terminal.draw(|f| {
+            let size = f.size();
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Percentage(100)].as_ref())
+                .split(size);
+
+            let text = if let Some(ref m) = latest {
+                format!(
+                    "CPU: {:.1}%\nMemory: {:.1}% ({:.1} / {:.1} GB)\nDisks: {}", 
+                    m.cpu_usage_percent,
+                    m.memory.usage_percent,
+                    m.memory.used_bytes as f64 / 1024.0 / 1024.0 / 1024.0,
+                    m.memory.total_bytes as f64 / 1024.0 / 1024.0 / 1024.0,
+                    m.disks.iter().map(|d| format!("{} {:.1}%", d.mount_point, d.usage_percent)).collect::<Vec<_>>().join(" | ")
+                )
+            } else {
+                "Waiting for metrics...".to_string()
+            };
+
+            let paragraph = Paragraph::new(text)
+                .block(Block::default().title("FerroLink Metrics").borders(Borders::ALL))
+                .style(Style::default().fg(Color::White));
+            f.render_widget(paragraph, chunks[0]);
+        })?;
+
+        // Handle key press
+        if event::poll(Duration::from_millis(50))? {
+            if let Event::Key(key) = event::read()? {
+                if key.code == KeyCode::Char('q') {
+                    break;
+                }
+            }
+        }
+    }
+
+    // Restore terminal
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
+
+    Ok(())
+}
+
+async fn fetch_metrics_once(addr: &str, connector: &TlsConnector, host: &str, token: &Option<String>) -> Result<SystemMetrics, Box<dyn std::error::Error>> {
+    let tcp = TcpStream::connect(addr).await?;
+    let stream = connector.connect(ServerName::try_from(host)?, tcp).await?;
+    let (mut reader, mut writer) = {
+        let (read_half, write_half) = tokio::io::split(stream);
+        (FramedRead::new(read_half, LengthDelimitedCodec::new()), FramedWrite::new(write_half, LengthDelimitedCodec::new()))
+    };
+
+    if let Some(t) = token {
+        send_msg(&mut writer, &Message::AuthRequest { token: t.clone() }).await?;
+        let auth_frame = reader.next().await.ok_or("No auth response")??;
+        match serde_json::from_slice::<Message>(&auth_frame)? {
+            Message::AuthOk => (),
+            Message::AuthErr { reason } => return Err(format!("Auth failed: {}", reason).into()),
+            _ => return Err("Unexpected auth response".into()),
+        }
+    }
+
+    send_msg(&mut writer, &Message::GetSystemMetrics).await?;
+    let frame = reader.next().await.ok_or("No metrics response")??;
+    let metrics = match serde_json::from_slice::<Message>(&frame)? {
+        Message::SystemMetrics(m) => m,
+        other => return Err(format!("Unexpected response: {:?}", other).into()),
+    };
+
+    // Gracefully close write half so the agent can finish without abrupt EOF
+    let _ = SinkExt::close(&mut writer).await;
+
+    Ok(metrics)
 }

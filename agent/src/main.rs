@@ -26,6 +26,12 @@ use hyper::{Body, Request, Response, Server};
 use hyper::service::{make_service_fn, service_fn};
 use once_cell::sync::Lazy;
 use prometheus::{Encoder, TextEncoder, IntCounter, register_int_counter};
+// System monitor shared across requests (keeps previous CPU stats)
+static SYS: Lazy<Mutex<System>> = Lazy::new(|| {
+    let mut s = System::new_all();
+    s.refresh_all();
+    Mutex::new(s)
+});
 
 #[derive(Parser)]
 #[command(name = "ferrolink-agent")]
@@ -330,11 +336,15 @@ where
 }
 
 async fn collect_system_metrics() -> Result<SystemMetrics> {
-    // Create system info collector
-    let mut system = System::new_all();
-    system.refresh_all();
-    
-    // Get CPU usage (average across all cores)
+    // Reuse global system; need to refresh to update stats
+    let mut system = SYS.lock().await;
+    // Refresh CPU and memory quickly
+    system.refresh_cpu();
+    system.refresh_memory();
+    system.refresh_disks_list();
+    system.refresh_disks();
+
+    // Average CPU usage
     let cpu_usage = system.cpus().iter()
         .map(|cpu| cpu.cpu_usage() as f64)
         .sum::<f64>() / system.cpus().len() as f64;
@@ -352,7 +362,7 @@ async fn collect_system_metrics() -> Result<SystemMetrics> {
         usage_percent: memory_usage_percent,
     };
     
-    // Get disk information
+    // Capture disk info
     let mut disks = Vec::new();
     for disk in system.disks() {
         let total_space = disk.total_space();
@@ -363,7 +373,7 @@ async fn collect_system_metrics() -> Result<SystemMetrics> {
         } else {
             0.0
         };
-        
+
         disks.push(DiskInfo {
             name: disk.name().to_string_lossy().to_string(),
             mount_point: disk.mount_point().to_string_lossy().to_string(),

@@ -19,3 +19,5 @@ rustls-pemfile = "1.0"
 rustls = { version = "0.21" }
 sha2 = "0.10"
 hex = "0.4"
+ratatui = { version = "0.24", default-features = false, features = ["crossterm"] }
+crossterm = "0.27"
