@@ -1,4 +1,5 @@
 use shared::{Message, SystemMetrics, DEFAULT_HOST, DEFAULT_PORT};
+use shared::Event;
 use tokio_util::codec::{LengthDelimitedCodec, FramedRead, FramedWrite};
 use bytes::Bytes;
 use futures::{StreamExt, SinkExt};
@@ -10,6 +11,7 @@ use std::sync::Arc;
 use std::fs::File;
 use std::io::BufReader;
 use rustls_pemfile::certs;
+use rustls_pemfile::{pkcs8_private_keys, rsa_private_keys};
 use futures::Sink;
 use tokio::net::TcpStream;
 use clap::{Parser, Subcommand};
@@ -32,6 +34,14 @@ struct Args {
     /// Path to server certificate (for dev self-signed)
     #[arg(long, default_value = "cert.pem")]
     cert_path: String,
+
+    /// Path to client certificate for mTLS (optional)
+    #[arg(long)]
+    client_cert: Option<String>,
+
+    /// Path to client private key for mTLS (optional)
+    #[arg(long)]
+    client_key: Option<String>,
 
     /// Authentication token to present to the agent
     #[arg(long)]
@@ -104,7 +114,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr = format!("{}:{}", args.host, args.port);
 
     // Build TLS connector once
-    let connector = build_tls_connector(&args.cert_path)?;
+    let connector = build_tls_connector(&args.cert_path, &args.client_cert, &args.client_key)?;
     
     match args.command {
         Commands::Ping => ping_agent(&addr, &connector, &args.host, &args.token).await?,
@@ -120,17 +130,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
          Ok(())
 }
 
-fn build_tls_connector(cert_path: &str) -> Result<TlsConnector, Box<dyn std::error::Error>> {
+fn build_tls_connector(cert_path: &str, client_cert: &Option<String>, client_key: &Option<String>) -> Result<TlsConnector, Box<dyn std::error::Error>> {
     let mut root_store = RootCertStore::empty();
     let mut reader = BufReader::new(File::open(cert_path)?);
     let certs_vec = certs(&mut reader)?;
     for cert in certs_vec {
         root_store.add(&rustls::Certificate(cert))?;
     }
-    let config = ClientConfig::builder()
-        .with_safe_defaults()
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
+
+    let config = ClientConfig::builder().with_safe_defaults().with_root_certificates(root_store);
+
+    let config = if let (Some(cert_path), Some(key_path)) = (client_cert, client_key) {
+        let cert_chain = {
+            let mut rdr = BufReader::new(File::open(cert_path)?);
+            certs(&mut rdr)?.into_iter().map(rustls::Certificate).collect::<Vec<_>>()
+        };
+        let key = {
+            let mut rdr = BufReader::new(File::open(key_path)?);
+            if let Some(k) = pkcs8_private_keys(&mut rdr)?.into_iter().next() {
+                rustls::PrivateKey(k)
+            } else {
+                // rewind and try RSA
+                let mut rdr = BufReader::new(File::open(key_path)?);
+                let k = rsa_private_keys(&mut rdr)?.into_iter().next().ok_or("No private key")?;
+                rustls::PrivateKey(k)
+            }
+        };
+        config.with_single_cert(cert_chain, key)?
+    } else {
+        config.with_no_client_auth()
+    };
     Ok(TlsConnector::from(Arc::new(config)))
 }
 
@@ -481,6 +510,8 @@ async fn watch_metrics(addr: &str, connector: &TlsConnector, host: &str, interva
             let bytes = frame?;
             if let Message::SystemMetrics(metrics) = serde_json::from_slice::<Message>(&bytes)? {
                 display_system_metrics(&metrics);
+            } else if let Message::Event(ev) = serde_json::from_slice::<Message>(&bytes)? {
+                println!("[EVENT] {}: {}", ev.kind, ev.message);
             } else {
                 info!("Received non-metrics message while watching");
             }

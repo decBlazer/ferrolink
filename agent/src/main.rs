@@ -1,4 +1,5 @@
 use shared::{Message, SystemMetrics, MemoryInfo, DiskInfo, DEFAULT_HOST, DEFAULT_PORT};
+use shared::Event;
 use tokio_util::codec::{LengthDelimitedCodec, FramedRead, FramedWrite};
 use bytes::Bytes;
 use futures::{StreamExt, SinkExt};
@@ -19,6 +20,8 @@ use futures::Sink;
 use std::fs::File;
 use std::io::BufReader;
 use rustls::{Certificate, PrivateKey, ServerConfig};
+use rustls::server::{AllowAnyAuthenticatedClient};
+use rustls::RootCertStore;
 use tokio_rustls::TlsAcceptor;
 use rustls_pemfile::{certs, pkcs8_private_keys, rsa_private_keys};
 // Add Prometheus / Hyper imports
@@ -53,6 +56,10 @@ struct Args {
     /// Path to TLS private key PEM file
     #[arg(long, default_value = "key.pem")]
     key_path: String,
+
+    /// Path to CA certificate to verify clients (enables mTLS if provided)
+    #[arg(long)]
+    ca_cert: Option<String>,
 
     /// Authentication token required from clients. If omitted, authentication is disabled.
     #[arg(long, env = "FERROLINK_TOKEN")]
@@ -158,10 +165,21 @@ async fn main() -> Result<()> {
     // Build TLS acceptor
     let certs = load_certs(&args.cert_path)?;
     let key = load_private_key(&args.key_path)?;
-    let tls_config = ServerConfig::builder()
-        .with_safe_defaults()
-        .with_no_client_auth()
-        .with_single_cert(certs, key)?;
+
+    let mut builder = ServerConfig::builder().with_safe_defaults();
+    let tls_config = if let Some(ca_path) = args.ca_cert.as_ref() {
+        let ca_certs = load_certs(ca_path)?;
+        let mut roots = RootCertStore::empty();
+        for c in ca_certs { roots.add(&c)?; }
+        let verifier = AllowAnyAuthenticatedClient::new(roots);
+        builder
+            .with_client_cert_verifier(Arc::new(verifier))
+            .with_single_cert(certs, key)?
+    } else {
+        builder
+            .with_no_client_auth()
+            .with_single_cert(certs, key)?
+    };
     let acceptor = TlsAcceptor::from(Arc::new(tls_config));
 
     let listener = TcpListener::bind(&addr).await?;
@@ -288,6 +306,10 @@ where
                         };
                         if let Err(e) = send_msg(&mut writer, &result_msg).await {
                             error!("Failed to send command result: {}", e);
+                        }
+                        // After sending CommandResult, also push an Event
+                        if let Err(e) = send_msg(&mut writer, &Message::Event(Event { kind: "CommandFinished".into(), message: format!("Command {} finished (success: {})", command_id, success) })).await {
+                            error!("Failed to send event: {}", e);
                         }
                     }
                     Err(e) => {
@@ -537,6 +559,9 @@ where
         if success {
             info!("File transfer completed successfully: {}", filename);
             FILE_TRANSFERS_TOTAL.inc();
+
+            // Notify client
+            send_msg(writer, &Message::Event(Event { kind: "FileTransferComplete".into(), message: format!("{} uploaded successfully", filename) })).await.ok();
         } else {
             info!("File transfer failed: {}", filename);
         }

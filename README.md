@@ -1,8 +1,8 @@
-# 🔧 FerroLink
+# FerroLink
 
 A secure, extensible client-server system for remote desktop monitoring and control, built in Rust.
 
-## 🏗️ Architecture
+## Architecture
 
 ```
 ┌─────────────────┐       TCP/JSON        ┌───────────────────────┐

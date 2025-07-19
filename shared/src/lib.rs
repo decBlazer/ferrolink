@@ -49,6 +49,8 @@ pub enum Message {
         filename: String,
         hash: Option<String>,
     },
+    // Asynchronous event pushed by agent
+    Event(Event),
     // Authentication messages
     AuthRequest { token: String },
     AuthOk,
@@ -69,6 +71,13 @@ pub enum Message {
         stderr: String,
         exit_code: i32,
     },
+}
+
+// Event information sent by agent to inform client about system or task status
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Event {
+    pub kind: String,   // e.g. "CommandFinished", "FileTransferComplete"
+    pub message: String,
 }
 
 // Data structure for system monitoring information
