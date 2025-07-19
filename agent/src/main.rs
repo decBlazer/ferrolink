@@ -29,6 +29,9 @@ use hyper::{Body, Request, Response, Server};
 use hyper::service::{make_service_fn, service_fn};
 use once_cell::sync::Lazy;
 use prometheus::{Encoder, TextEncoder, IntCounter, register_int_counter};
+use lettre::{AsyncSmtpTransport, AsyncTransport, Message as EmailMessage, Tokio1Executor, transport::smtp::authentication::Credentials};
+use tokio_stream::wrappers::ReceiverStream;
+use tokio::sync::mpsc;
 // System monitor shared across requests (keeps previous CPU stats)
 static SYS: Lazy<Mutex<System>> = Lazy::new(|| {
     let mut s = System::new_all();
@@ -68,6 +71,22 @@ struct Args {
     /// Port for Prometheus `/metrics` endpoint
     #[arg(long, default_value_t = 9090)]
     metrics_port: u16,
+
+    /// SMTP server for email notifications (host:port)
+    #[arg(long)]
+    smtp_server: Option<String>,
+
+    /// SMTP username
+    #[arg(long)]
+    smtp_user: Option<String>,
+
+    /// SMTP password (or app password)
+    #[arg(long)]
+    smtp_pass: Option<String>,
+
+    /// Comma-separated list of email addresses to notify
+    #[arg(long)]
+    notify_emails: Option<String>,
 }
 
 // File transfer state tracking
@@ -150,6 +169,45 @@ async fn start_metrics_server(addr: std::net::SocketAddr) -> Result<(), hyper::E
     Server::bind(&addr).serve(make_svc).await
 }
 
+// Convenience wrapper around optional email transport
+struct Notifier {
+    transport: Option<AsyncSmtpTransport<Tokio1Executor>>,
+    recipients: Vec<String>,
+    from: String,
+}
+
+impl Notifier {
+    fn new(args: &Args) -> Self {
+        if let (Some(server), Some(user), Some(pass), Some(recip)) = (&args.smtp_server, &args.smtp_user, &args.smtp_pass, &args.notify_emails) {
+            let creds = Credentials::new(user.clone(), pass.clone());
+            let transport = AsyncSmtpTransport::<Tokio1Executor>::relay(server)
+                .expect("valid smtp")
+                .credentials(creds)
+                .port(server.split(':').nth(1).and_then(|p| p.parse().ok()).unwrap_or(587))
+                .build();
+            let recipients: Vec<String> = recip.split(',').map(|s| s.trim().to_string()).collect();
+            Self { transport: Some(transport), recipients, from: user.clone() }
+        } else {
+            Self { transport: None, recipients: vec![], from: "noreply@example.com".into() }
+        }
+    }
+
+    async fn notify(&self, subject: &str, body: &str) {
+        if let Some(ref transport) = self.transport {
+            for to in &self.recipients {
+                let email = EmailMessage::builder()
+                    .from(self.from.parse().unwrap())
+                    .to(to.parse().unwrap())
+                    .subject(subject)
+                    .body(body.to_string())
+                    .unwrap();
+                // fire and forget
+                let _ = transport.send(email).await;
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize tracing subscriber (env-controlled log level)
@@ -158,6 +216,7 @@ async fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
+    let notifier = Notifier::new(&args);
     let addr = format!("{}:{}", args.host, args.port);
     info!("Starting agent on {}", addr);
     info!("Upload directory: {}", args.upload_dir);
@@ -206,6 +265,8 @@ async fn main() -> Result<()> {
         let file_transfers_clone = Arc::clone(&file_transfers);
         let upload_dir_clone = Arc::clone(&upload_dir);
         let expected_token = args.token.clone();
+        let notifier_clone = notifier.clone();
+        
         tokio::spawn(async move {
             let tls_stream = match acceptor.accept(tcp_stream).await {
                 Ok(s) => s,
@@ -214,7 +275,7 @@ async fn main() -> Result<()> {
                     return;
                 }
             };
-            if let Err(e) = handle_client(tls_stream, file_transfers_clone, upload_dir_clone, expected_token).await {
+            if let Err(e) = handle_client(tls_stream, file_transfers_clone, upload_dir_clone, expected_token, notifier_clone).await {
                 error!("Error handling client {}: {}", peer_addr, e);
             }
             info!("Client {} disconnected", peer_addr);
@@ -227,6 +288,7 @@ async fn handle_client<S>(
     file_transfers: Arc<Mutex<HashMap<Uuid, FileTransferState>>>,
     upload_dir: Arc<String>,
     expected_token: Option<String>,
+    notifier: Notifier,
 ) -> Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
