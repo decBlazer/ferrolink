@@ -3,6 +3,7 @@ use tokio_util::codec::{LengthDelimitedCodec, FramedRead, FramedWrite};
 use bytes::Bytes;
 use futures::{StreamExt, SinkExt};
 use tokio::net::TcpListener;
+use tokio::process::Command as TokioCommand;
 use sysinfo::{System, SystemExt, DiskExt, CpuExt};
 use anyhow::Result;
 use std::collections::HashMap;
@@ -254,6 +255,42 @@ where
                     }
                     Err(e) => {
                         error!("Failed to collect system metrics: {}", e);
+                    }
+                }
+            }
+            Message::ExecuteCommand { command_id, program, args } => {
+                info!("Executing command: {} {:?}", program, args);
+                let output_result = TokioCommand::new(&program)
+                    .args(&args)
+                    .output()
+                    .await;
+
+                match output_result {
+                    Ok(output) => {
+                        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                        let exit_code = output.status.code().unwrap_or(-1);
+                        let success = output.status.success();
+                        let result_msg = Message::CommandResult {
+                            command_id,
+                            success,
+                            stdout,
+                            stderr,
+                            exit_code,
+                        };
+                        if let Err(e) = send_msg(&mut writer, &result_msg).await {
+                            error!("Failed to send command result: {}", e);
+                        }
+                    }
+                    Err(e) => {
+                        let result_msg = Message::CommandResult {
+                            command_id,
+                            success: false,
+                            stdout: String::new(),
+                            stderr: format!("Failed to execute command: {}", e),
+                            exit_code: -1,
+                        };
+                        send_msg(&mut writer, &result_msg).await.ok();
                     }
                 }
             }

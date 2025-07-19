@@ -60,6 +60,14 @@ enum Commands {
         #[arg(long, default_value_t = 9)]
         port: u16,
     },
+    /// Execute a command on the remote agent
+    Exec {
+        /// Program to execute (e.g. "ls")
+        program: String,
+        /// Arguments for the program (pass after --)
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
 }
 
 #[tokio::main]
@@ -80,6 +88,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Monitor => get_system_metrics(&addr, &connector, &args.host, &args.token).await?,
         Commands::SendFile { file, chunk_size } => send_file(&addr, &connector, &args.host, &file, chunk_size, &args.token).await?,
         Commands::Wol { mac, port } => send_magic_packet(&mac, port).await?,
+        Commands::Exec { program, args: cmd_args } => exec_command(&addr, &connector, &args.host, &program, &cmd_args, &args.token).await?,
     }
     
          Ok(())
@@ -358,5 +367,57 @@ async fn send_magic_packet(mac_str: &str, port: u16) -> Result<(), Box<dyn std::
     socket.send_to(&packet, &addr).await?;
     info!("Wake-on-LAN packet sent successfully!");
     
+    Ok(())
+}
+
+async fn exec_command(addr: &str, connector: &TlsConnector, host: &str, program: &str, args: &[String], token: &Option<String>) -> Result<(), Box<dyn std::error::Error>> {
+    info!("Connecting to agent at {}", addr);
+
+    let tcp = TcpStream::connect(addr).await?;
+    let stream = connector.connect(ServerName::try_from(host)?, tcp).await?;
+    let (read_half, write_half) = tokio::io::split(stream);
+    let mut reader = FramedRead::new(read_half, LengthDelimitedCodec::new());
+    let mut writer = FramedWrite::new(write_half, LengthDelimitedCodec::new());
+
+    // Authentication if required
+    if let Some(t) = token {
+        send_msg(&mut writer, &Message::AuthRequest { token: t.clone() }).await?;
+        let auth_frame = reader.next().await.ok_or("No auth response")??;
+        match serde_json::from_slice::<Message>(&auth_frame)? {
+            Message::AuthOk => info!("Authenticated successfully"),
+            Message::AuthErr { reason } => return Err(format!("Authentication failed: {}", reason).into()),
+            other => return Err(format!("Unexpected auth response: {:?}", other).into()),
+        }
+    }
+
+    // Build and send execute command message
+    let command_id = Uuid::new_v4();
+    let exec_msg = Message::ExecuteCommand {
+        command_id,
+        program: program.to_string(),
+        args: args.to_vec(),
+    };
+    send_msg(&mut writer, &exec_msg).await?;
+
+    // Await result
+    while let Some(frame) = reader.next().await {
+        let bytes = frame?;
+        match serde_json::from_slice::<Message>(&bytes)? {
+            Message::CommandResult { command_id: res_id, success, stdout, stderr, exit_code } if res_id == command_id => {
+                println!("Command exited with code {} (success: {})", exit_code, success);
+                if !stdout.is_empty() {
+                    println!("\n--- STDOUT ---\n{}", stdout);
+                }
+                if !stderr.is_empty() {
+                    println!("\n--- STDERR ---\n{}", stderr);
+                }
+                break;
+            }
+            other => {
+                info!("Received unrelated message: {:?}", other);
+            }
+        }
+    }
+
     Ok(())
 }

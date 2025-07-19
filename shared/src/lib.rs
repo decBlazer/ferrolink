@@ -43,6 +43,22 @@ pub enum Message {
     AuthRequest { token: String },
     AuthOk,
     AuthErr { reason: String },
+    
+    // Remote command execution
+    /// Execute a program with optional arguments on the agent
+    ExecuteCommand {
+        command_id: Uuid,
+        program: String,
+        args: Vec<String>,
+    },
+    /// Result of a previously requested command execution
+    CommandResult {
+        command_id: Uuid,
+        success: bool,
+        stdout: String,
+        stderr: String,
+        exit_code: i32,
+    },
 }
 
 // Data structure for system monitoring information
