@@ -28,10 +28,9 @@ use rustls_pemfile::{certs, pkcs8_private_keys, rsa_private_keys};
 use hyper::{Body, Request, Response, Server};
 use hyper::service::{make_service_fn, service_fn};
 use once_cell::sync::Lazy;
-use prometheus::{Encoder, TextEncoder, IntCounter, register_int_counter};
+use prometheus::{Encoder, TextEncoder, IntCounter, HistogramVec, register_int_counter, register_histogram_vec};
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message as EmailMessage, Tokio1Executor, transport::smtp::authentication::Credentials};
-use tokio_stream::wrappers::ReceiverStream;
-use tokio::sync::mpsc;
+
 // System monitor shared across requests (keeps previous CPU stats)
 static SYS: Lazy<Mutex<System>> = Lazy::new(|| {
     let mut s = System::new_all();
@@ -97,6 +96,7 @@ struct FileTransferState {
     chunk_size: u32,
     expected_chunks: u32,
     received_chunks: HashMap<u32, Vec<u8>>,
+    start_time: std::time::Instant,
 }
 
 // Helper to send a Message via a framed writer
@@ -143,6 +143,25 @@ static AUTH_FAILURES_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
 static FILE_TRANSFERS_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!("file_transfers_total", "Completed file transfers").unwrap()
 });
+static BYTES_RECEIVED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!("bytes_received_total", "Total bytes received by agent").unwrap()
+});
+
+static CMD_DURATION_SECONDS: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
+        "command_duration_seconds",
+        "Time taken to execute remote commands",
+        &["program"]
+    ).unwrap()
+});
+
+static FILE_TRANSFER_DURATION_SECONDS: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
+        "file_transfer_duration_seconds",
+        "Time taken to complete file transfers",
+        &["filename"]
+    ).unwrap()
+});
 // =============================================================
 
 async fn start_metrics_server(addr: std::net::SocketAddr) -> Result<(), hyper::Error> {
@@ -170,9 +189,10 @@ async fn start_metrics_server(addr: std::net::SocketAddr) -> Result<(), hyper::E
 }
 
 // Convenience wrapper around optional email transport
+#[derive(Clone)]
 struct Notifier {
-    transport: Option<AsyncSmtpTransport<Tokio1Executor>>,
-    recipients: Vec<String>,
+    transport: Option<Arc<AsyncSmtpTransport<Tokio1Executor>>>,
+    recipients: Arc<Vec<String>>,
     from: String,
 }
 
@@ -186,15 +206,15 @@ impl Notifier {
                 .port(server.split(':').nth(1).and_then(|p| p.parse().ok()).unwrap_or(587))
                 .build();
             let recipients: Vec<String> = recip.split(',').map(|s| s.trim().to_string()).collect();
-            Self { transport: Some(transport), recipients, from: user.clone() }
+            Self { transport: Some(Arc::new(transport)), recipients: Arc::new(recipients), from: user.clone() }
         } else {
-            Self { transport: None, recipients: vec![], from: "noreply@example.com".into() }
+            Self { transport: None, recipients: Arc::new(vec![]), from: "noreply@example.com".into() }
         }
     }
 
     async fn notify(&self, subject: &str, body: &str) {
         if let Some(ref transport) = self.transport {
-            for to in &self.recipients {
+            for to in self.recipients.iter() {
                 let email = EmailMessage::builder()
                     .from(self.from.parse().unwrap())
                     .to(to.parse().unwrap())
@@ -348,10 +368,12 @@ where
             }
             Message::ExecuteCommand { command_id, program, args } => {
                 info!("Executing command: {} {:?}", program, args);
+                let timer = CMD_DURATION_SECONDS.with_label_values(&[&program]).start_timer();
                 let output_result = TokioCommand::new(&program)
                     .args(&args)
                     .output()
                     .await;
+                timer.observe_duration();
 
                 match output_result {
                     Ok(output) => {
@@ -498,6 +520,7 @@ where
                 chunk_size,
                 expected_chunks,
                 received_chunks: HashMap::new(),
+                start_time: std::time::Instant::now(),
             };
             
             // Store the transfer state
@@ -514,6 +537,7 @@ where
         
         Message::FileChunk { transfer_id, chunk_number, data, is_last_chunk: _ } => {
             info!("Received chunk {} for transfer {}", chunk_number, transfer_id);
+            BYTES_RECEIVED_TOTAL.inc_by(data.len() as u64);
             
             let mut should_complete = false;
             let filename;
@@ -581,6 +605,8 @@ where
     let transfer_result = {
         let mut transfers = file_transfers.lock().await;
         if let Some(transfer_state) = transfers.remove(&transfer_id) {
+            let duration = transfer_state.start_time.elapsed();
+            FILE_TRANSFER_DURATION_SECONDS.with_label_values(&[filename]).observe(duration.as_secs_f64());
             // Reconstruct the file from chunks
             let mut file_data = Vec::with_capacity(transfer_state.total_size as usize);
             

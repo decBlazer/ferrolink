@@ -1,3 +1,9 @@
 /target
 key.pem
 cert.pem
+*.pem
+*.cnf
+*.csr
+*.key
+*.crt
+*.srl
