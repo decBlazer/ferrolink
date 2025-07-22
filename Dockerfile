@@ -7,10 +7,14 @@ FROM rust:slim AS builder
 
 WORKDIR /app
 
+# System deps for building crates (openssl)
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends pkg-config libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
 # --- dependency caching ---------------------------------------------
 # Copy manifest files first so Docker cache is invalidated only when
 # dependencies change, not on every source edit.
-COPY Cargo.toml ./
+COPY Cargo.toml Cargo.lock ./
 COPY shared/Cargo.toml ./shared/Cargo.toml
 COPY agent/Cargo.toml ./agent/Cargo.toml
 COPY client/Cargo.toml ./client/Cargo.toml
@@ -24,7 +28,7 @@ RUN cargo fetch
 
 # Copy the rest (tests, README, etc.) and compile
 COPY . .
-RUN cargo build --release -p agent --locked
+RUN cargo build --release -p agent
 
 #############################
 # Stage 2 – Minimal runtime  #

@@ -28,6 +28,7 @@ services:
     container_name: ferrolink-postgres
     restart: unless-stopped
     environment:
+      # TODO: move to secrets.env
       POSTGRES_USER: ferrolink
       POSTGRES_PASSWORD: ferrolink
       POSTGRES_DB: ferrolink

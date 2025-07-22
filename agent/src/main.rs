@@ -503,14 +503,15 @@ async fn collect_system_metrics() -> Result<SystemMetrics> {
         });
     }
     
-    // Persist metrics to PostgreSQL (best effort)
-    let _ = sqlx::query!(
-        r#"INSERT INTO system_metrics (cpu_usage_percent, mem_used_mb, mem_total_mb)
-           VALUES ($1, $2, $3)"#,
-        cpu_usage,
-        (used_memory / 1024 / 1024) as i32,
-        (total_memory / 1024 / 1024) as i32
+    // Persist metrics to PostgreSQL (best effort). Use dynamic query to avoid
+    // sqlx compile-time verification that requires a live DATABASE_URL during
+    // container build.
+    let _ = sqlx::query(
+        "INSERT INTO system_metrics (cpu_usage_percent, mem_used_mb, mem_total_mb) VALUES ($1, $2, $3)",
     )
+    .bind(cpu_usage)
+    .bind((used_memory / 1024 / 1024) as i32)
+    .bind((total_memory / 1024 / 1024) as i32)
     .execute(&*DB_POOL)
     .await;
 
