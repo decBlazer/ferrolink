@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: ferrolink
+          POSTGRES_PASSWORD: ferrolink
+          POSTGRES_DB: ferrolink
+        ports: [ '5432:5432' ]
+        options: >-
+          --health-cmd="pg_isready -U ferrolink" --health-interval=10s --health-timeout=5s --health-retries=5
+
+    env:
+      DATABASE_URL: postgres://ferrolink:ferrolink@localhost:5432/ferrolink
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+          profile: minimal
+
+      - name: Install sqlx-cli
+        run: cargo install sqlx-cli --no-default-features --features postgres,rustls --quiet
+
+      - name: Run migrations check
+        run: sqlx migrate run --source migrations
+
+      - name: Prepare sqlx metadata
+        run: cargo sqlx prepare --check --workspace
+
+      - name: Build and test
+        run: |
+          cargo test --workspace --all-features
+          cargo build --workspace --release 

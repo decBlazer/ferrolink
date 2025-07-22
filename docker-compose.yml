@@ -23,6 +23,27 @@ services:
     depends_on:
       - agent 
 
+  # --- one-shot migration runner -----------------------------------
+  migrate:
+    image: launchbadge/sqlx-cli:0.7.2
+    depends_on:
+      - postgres
+    volumes:
+      - ./migrations:/migrations:ro
+    environment:
+      - DATABASE_URL=postgres://ferrolink:ferrolink@postgres:5432/ferrolink
+    command: ["sqlx", "migrate", "run", "--source", "/migrations"]
+
+  # --- React dashboard ---------------------------------------------
+  dashboard:
+    build: ./dashboard
+    ports:
+      - "3000:80"      # served via nginx inside image
+    depends_on:
+      - agent
+    environment:
+      - VITE_API_BASE=http://localhost:9090
+
   postgres:
     image: postgres:15-alpine
     container_name: ferrolink-postgres

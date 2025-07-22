@@ -1,5 +1,4 @@
 use shared::{Message, SystemMetrics, DEFAULT_HOST, DEFAULT_PORT};
-use shared::Event;
 use tokio_util::codec::{LengthDelimitedCodec, FramedRead, FramedWrite};
 use bytes::Bytes;
 use futures::{StreamExt, SinkExt};
