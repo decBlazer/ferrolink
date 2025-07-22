@@ -30,6 +30,8 @@ use hyper::service::{make_service_fn, service_fn};
 use once_cell::sync::Lazy;
 use prometheus::{Encoder, TextEncoder, IntCounter, HistogramVec, register_int_counter, register_histogram_vec};
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message as EmailMessage, Tokio1Executor, transport::smtp::authentication::Credentials};
+use dotenvy::dotenv;
+use sqlx::{Pool, Postgres, postgres::PgPoolOptions};
 
 // System monitor shared across requests (keeps previous CPU stats)
 static SYS: Lazy<Mutex<System>> = Lazy::new(|| {
@@ -37,6 +39,16 @@ static SYS: Lazy<Mutex<System>> = Lazy::new(|| {
     s.refresh_all();
     Mutex::new(s)
 });
+
+// -------------- PostgreSQL connection pool -------------------
+static DB_POOL: Lazy<Pool<Postgres>> = Lazy::new(|| {
+    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL env var missing");
+    PgPoolOptions::new()
+        .max_connections(5)
+        .connect_lazy(&url)
+        .expect("Failed to create PG pool")
+});
+// -------------------------------------------------------------
 
 #[derive(Parser)]
 #[command(name = "ferrolink-agent")]
@@ -234,6 +246,7 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .init();
+    dotenv().ok();
 
     let args = Args::parse();
     let notifier = Notifier::new(&args);
@@ -490,6 +503,17 @@ async fn collect_system_metrics() -> Result<SystemMetrics> {
         });
     }
     
+    // Persist metrics to PostgreSQL (best effort)
+    let _ = sqlx::query!(
+        r#"INSERT INTO system_metrics (cpu_usage_percent, mem_used_mb, mem_total_mb)
+           VALUES ($1, $2, $3)"#,
+        cpu_usage,
+        (used_memory / 1024 / 1024) as i32,
+        (total_memory / 1024 / 1024) as i32
+    )
+    .execute(&*DB_POOL)
+    .await;
+
     Ok(SystemMetrics {
         cpu_usage_percent: cpu_usage,
         memory,

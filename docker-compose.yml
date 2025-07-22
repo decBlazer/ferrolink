@@ -22,3 +22,19 @@ services:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
     depends_on:
       - agent 
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: ferrolink-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ferrolink
+      POSTGRES_PASSWORD: ferrolink
+      POSTGRES_DB: ferrolink
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+volumes:
+  pgdata: 

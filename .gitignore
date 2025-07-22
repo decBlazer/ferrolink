@@ -7,3 +7,4 @@ cert.pem
 *.key
 *.crt
 *.srl
+*.env
