@@ -155,7 +155,7 @@ fn build_tls_connector(cert_path: &str, client_cert: &Option<String>, client_key
                 rustls::PrivateKey(k)
             }
         };
-        config.with_single_cert(cert_chain, key)?
+        config.with_client_auth_cert(cert_chain, key)?
     } else {
         config.with_no_client_auth()
     };
@@ -334,7 +334,7 @@ async fn send_file(addr: &str, connector: &TlsConnector, host: &str, file_path: 
     send_msg(&mut writer, &start_message).await?;
 
     // Wait for FileTransferReady response
-    let mut frame = reader.next().await.ok_or("No response from agent")??;
+    let frame = reader.next().await.ok_or("No response from agent")??;
     match serde_json::from_slice::<Message>(&frame)? {
         Message::FileTransferReady { transfer_id: ready_id } if ready_id == transfer_id => {
             info!("Agent ready to receive file");
@@ -399,7 +399,7 @@ async fn send_file(addr: &str, connector: &TlsConnector, host: &str, file_path: 
 async fn send_magic_packet(mac_str: &str, port: u16) -> Result<(), Box<dyn std::error::Error>> {
     // Parse MAC address (AA:BB:CC:DD:EE:FF)
     let bytes: Vec<u8> = mac_str
-        .split(|c| c == ':' || c == '-')
+        .split(&[':', '-'][..])
         .map(|s| u8::from_str_radix(s, 16))
         .collect::<Result<_, _>>()?;
     if bytes.len() != 6 {
@@ -591,7 +591,7 @@ async fn run_tui(addr: &str, connector: &TlsConnector, host: &str, interval_secs
     use tokio::time::{sleep, Duration};
 
     // Channel to pass metrics to UI
-    let (tx, mut rx) = watch::channel(None::<SystemMetrics>);
+    let (tx, rx) = watch::channel(None::<SystemMetrics>);
 
     // ----------------- Networking task -----------------
     let addr_owned = addr.to_string();

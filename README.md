@@ -19,12 +19,13 @@ A secure, extensible client-server system for remote desktop monitoring and cont
 - **🖥CLI Interface**: Clean command-line interface with clap
 - **Structured Logging**: Comprehensive logging with tracing
 
-## Quick Start
+## Quick Start (TLS-enabled)
 
 ### Prerequisites
-- Rust 1.70+ with Cargo
+* Rust 1.70+ with Cargo
+* OpenSSL (for generating test certificates)
 
-### Building
+### Build workspace
 
 ```bash
 # Build the entire workspace
@@ -36,33 +37,44 @@ cargo build -p client   # Laptop client
 cargo build -p shared   # Common library
 ```
 
-### Running
-
-#### 1. Start the Agent (Desktop)
+### 1. Generate a self-signed certificate (dev only)
 ```bash
-# Default: listen on 127.0.0.1:8080
-./target/release/agent
-
-# Custom host/port
-./target/release/agent --host 0.0.0.0 --port 9000
+# Generate key
+openssl genrsa -out key.pem 2048
+# Generate leaf cert (CA:FALSE) valid for localhost
+openssl req -new -x509 -key key.pem -days 365 -out cert.pem \
+  -subj "/CN=localhost" \
+  -addext "basicConstraints=CA:FALSE" \
+  -addext "keyUsage=digitalSignature,keyEncipherment" \
+  -addext "extendedKeyUsage=serverAuth" \
+  -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
 ```
 
-#### 2. Connect with Client (Laptop)
+### 2. Run the Agent
 ```bash
-# Test connection
-./target/release/client ping
+# Listen on 0.0.0.0:8443 with TLS and Prometheus on :9090
+RUST_LOG=info \
+cargo run -p agent --  \
+  --host 0.0.0.0 --port 8443 \
+  --cert-path cert.pem --key-path key.pem \
+  --upload-dir uploads \
+  --metrics-port 9090
+```
 
-# Get current system metrics
-./target/release/client monitor
+### 3. Run the Client
+```bash
+# Ping the agent
+RUST_LOG=info \
+cargo run -p client --  \
+  --host 127.0.0.1 --port 8443 \
+  --cert-path cert.pem \
+  ping
 
-# Watch metrics continuously (updates every 2 seconds)
-./target/release/client watch
+# Show one-shot metrics
+cargo run -p client -- --cert-path cert.pem monitor
 
-# Watch with custom interval
-./target/release/client watch --interval 5
-
-# Connect to remote host
-./target/release/client --host 192.168.1.100 monitor
+# Live TUI (press q to quit)
+cargo run -p client -- --cert-path cert.pem tui --interval 1
 ```
 
 ## Command Reference
@@ -81,14 +93,21 @@ OPTIONS:
 ```bash
 client [OPTIONS] <COMMAND>
 
-OPTIONS:
-    -H, --host <HOST>    Agent host [default: 127.0.0.1]
-    -p, --port <PORT>    Agent port [default: 8080]
+Global OPTIONS:
+  -H, --host <HOST>       Agent host [default: 127.0.0.1]
+  -p, --port <PORT>       Agent port [default: 8443]
+      --cert-path <FILE>  Path to server certificate (trust)
+      --token <STRING>    Auth token (if required by agent)
 
 COMMANDS:
-    ping      Test connection to the agent
-    monitor   Get current system metrics
-    watch     Monitor system metrics continuously
+  ping                     ‑ Test connection
+  monitor                  ‑ Fetch current metrics
+  watch      [--interval]  ‑ Continuously fetch metrics
+  tui        [--interval]  ‑ Terminal dashboard
+  send-file  --file <P> [--chunk-size]        ‑ Upload file
+  sync       --file <P> [--chunk-size]        ‑ Upload only if hash differs
+  exec       --program <P> [-- arg..]         ‑ Remote command execution
+  wol        --mac <AA:BB:CC:DD:EE:FF> [--port] ‑ Wake-on-LAN magic packet
 ```
 
 ## Development
@@ -120,17 +139,20 @@ ferrolink/
 
 ## Roadmap
 
-### Phase 2: Advanced Features
-- [ ] Remote command execution
-- [ ] File synchronization
-- [ ] Wake-on-LAN support
-- [ ] Terminal UI with ratatui
+### Completed
+- [x] TLS encryption (server + client trust)
+- [x] Authentication token support
+- [x] Remote command execution
+- [x] File synchronization & chunked uploads
+- [x] Wake-on-LAN support
+- [x] Terminal UI with ratatui
 
-### Phase 3: Production Ready
-- [ ] TLS encryption
-- [ ] Authentication system
-- [ ] Plugin architecture
-- [ ] Performance dashboard
+### Next Up
+- [ ] Persist historical metrics & expose Grafana dashboards
+- [ ] Binary packaging (cross-compile) & installer scripts
+- [ ] Web dashboard (dashboard/ directory)
+- [ ] Plugin architecture for custom actions
+- [ ] Stress/performance tests
 
 ## Usage Examples
 

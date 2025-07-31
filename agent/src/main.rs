@@ -7,7 +7,6 @@ use tokio::net::TcpListener;
 use tokio::process::Command as TokioCommand;
 use sysinfo::{System, SystemExt, DiskExt, CpuExt};
 use sha2::{Sha256, Digest};
-use hex;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -202,12 +201,14 @@ async fn start_metrics_server(addr: std::net::SocketAddr) -> Result<(), hyper::E
 
 // Convenience wrapper around optional email transport
 #[derive(Clone)]
+#[allow(dead_code)]
 struct Notifier {
     transport: Option<Arc<AsyncSmtpTransport<Tokio1Executor>>>,
     recipients: Arc<Vec<String>>,
     from: String,
 }
 
+#[allow(dead_code)]
 impl Notifier {
     fn new(args: &Args) -> Self {
         if let (Some(server), Some(user), Some(pass), Some(recip)) = (&args.smtp_server, &args.smtp_user, &args.smtp_pass, &args.notify_emails) {
@@ -258,7 +259,7 @@ async fn main() -> Result<()> {
     let certs = load_certs(&args.cert_path)?;
     let key = load_private_key(&args.key_path)?;
 
-    let mut builder = ServerConfig::builder().with_safe_defaults();
+    let builder = ServerConfig::builder().with_safe_defaults();
     let tls_config = if let Some(ca_path) = args.ca_cert.as_ref() {
         let ca_certs = load_certs(ca_path)?;
         let mut roots = RootCertStore::empty();
@@ -298,7 +299,7 @@ async fn main() -> Result<()> {
         let file_transfers_clone = Arc::clone(&file_transfers);
         let upload_dir_clone = Arc::clone(&upload_dir);
         let expected_token = args.token.clone();
-        let notifier_clone = notifier.clone();
+        let _notifier = notifier.clone();
         
         tokio::spawn(async move {
             let tls_stream = match acceptor.accept(tcp_stream).await {
@@ -308,7 +309,7 @@ async fn main() -> Result<()> {
                     return;
                 }
             };
-            if let Err(e) = handle_client(tls_stream, file_transfers_clone, upload_dir_clone, expected_token, notifier_clone).await {
+            if let Err(e) = handle_client(tls_stream, file_transfers_clone, upload_dir_clone, expected_token, _notifier).await {
                 error!("Error handling client {}: {}", peer_addr, e);
             }
             info!("Client {} disconnected", peer_addr);
@@ -321,7 +322,7 @@ async fn handle_client<S>(
     file_transfers: Arc<Mutex<HashMap<Uuid, FileTransferState>>>,
     upload_dir: Arc<String>,
     expected_token: Option<String>,
-    notifier: Notifier,
+    _notifier: Notifier,
 ) -> Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -536,7 +537,7 @@ where
             info!("Starting file transfer: {} ({} bytes)", filename, total_size);
             
             // Calculate expected number of chunks
-            let expected_chunks = ((total_size + chunk_size as u64 - 1) / chunk_size as u64) as u32;
+            let expected_chunks = total_size.div_ceil(chunk_size as u64) as u32;
             
             // Create new transfer state
             let transfer_state = FileTransferState {
