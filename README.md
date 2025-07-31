@@ -154,6 +154,13 @@ ferrolink/
 - [ ] Plugin architecture for custom actions
 - [ ] Stress/performance tests
 
+#### Low-hanging fruit (work in progress)
+- [ ] Multi-stage minimal Docker images (`Dockerfile` refactor)
+- [ ] GitHub Actions CI: build, test, clippy, audit, push images
+- [x] `/healthz` HTTP endpoint with build version ✅
+- [ ] Enforce TLS-1.3-only ciphers in config
+- [ ] End-to-end integration test that spins up agent + client
+
 ## Usage Examples
 
 ### Basic Monitoring

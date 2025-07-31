@@ -1,63 +1,55 @@
 # syntax=docker/dockerfile:1
 
-#############################
-# Stage 1 – Build the agent #
-#############################
-FROM rust:slim AS builder
+###############################
+# Stage 1 – Compile static MUSL #
+###############################
+FROM rust:1.77-slim AS builder
+
+ARG TARGET=x86_64-unknown-linux-musl
+ENV CARGO_TERM_COLOR=always
 
 WORKDIR /app
 
-# System deps for building crates (openssl)
+# ---- System deps ----
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends pkg-config libssl-dev \
+    && apt-get install -y --no-install-recommends musl-tools pkg-config libssl-dev ca-certificates \
+    && rustup target add "${TARGET}" \
     && rm -rf /var/lib/apt/lists/*
-# --- dependency caching ---------------------------------------------
-# Copy manifest files first so Docker cache is invalidated only when
-# dependencies change, not on every source edit.
+
+# ---- Layered caching for Rust deps ----
 COPY Cargo.toml Cargo.lock ./
 COPY shared/Cargo.toml ./shared/Cargo.toml
 COPY agent/Cargo.toml ./agent/Cargo.toml
-COPY client/Cargo.toml ./client/Cargo.toml
-# Provide minimal src trees for target discovery
-COPY shared/src ./shared/src
-COPY agent/src ./agent/src
-COPY client/src ./client/src
 
-# Pre-fetch crates
-RUN cargo fetch
+# Empty src to compute dependency graph only
+RUN mkdir -p shared/src agent/src \
+    && echo "fn main(){}" > agent/src/main.rs \
+    && echo "pub fn foo(){}" > shared/src/lib.rs
 
-# Copy the rest (tests, README, etc.) and compile
+RUN cargo build --release --target "${TARGET}" -p agent
+
+# ---- Actual source ----
 COPY . .
-RUN cargo build --release -p agent
+RUN cargo build --release --locked --target "${TARGET}" -p agent \
+    && strip target/"${TARGET}"/release/agent
 
 #############################
-# Stage 2 – Minimal runtime  #
+# Stage 2 – Distroless image #
 #############################
-FROM debian:bookworm-slim AS runtime
-
-# Install ca-certificates for TLS outbound calls & logging
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+FROM gcr.io/distroless/static-debian12:nonroot AS runtime
 
 WORKDIR /app
 
-# Copy the statically linked agent binary from the builder stage
-COPY --from=builder /app/target/release/agent /usr/local/bin/agent
+# Copy binary
+COPY --from=builder /app/target/${TARGET}/release/agent /agent
 
-# Create default upload directory (can be replaced by a volume)
-RUN mkdir /app/uploads
+# Upload directory (bind-mount or volume)
 VOLUME ["/app/uploads"]
 
-# Expose the default agent port
-EXPOSE 8080
+EXPOSE 8443 9090
 
+# Default log level
 ENV RUST_LOG=info
 
-# Entrypoint & default arguments (override with `docker run ... CMD`)
-ENTRYPOINT ["/usr/local/bin/agent"]
-CMD ["--host", "0.0.0.0", \
-     "--port", "8080", \
-     "--upload-dir", "/app/uploads", \
-     "--cert-path", "/app/cert.pem", \
-     "--key-path", "/app/key.pem"] 
+ENTRYPOINT ["/agent"]
+CMD ["--host","0.0.0.0", "--port","8443", "--metrics-port","9090", "--upload-dir","/app/uploads", "--cert-path","/app/cert.pem", "--key-path","/app/key.pem"] 

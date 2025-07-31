@@ -28,6 +28,8 @@ use hyper::{Body, Request, Response, Server};
 use hyper::service::{make_service_fn, service_fn};
 use once_cell::sync::Lazy;
 use prometheus::{Encoder, TextEncoder, IntCounter, HistogramVec, register_int_counter, register_histogram_vec};
+// Build info
+const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message as EmailMessage, Tokio1Executor, transport::smtp::authentication::Credentials};
 use dotenvy::dotenv;
 use sqlx::{Pool, Postgres, postgres::PgPoolOptions};
@@ -178,22 +180,32 @@ static FILE_TRANSFER_DURATION_SECONDS: Lazy<HistogramVec> = Lazy::new(|| {
 async fn start_metrics_server(addr: std::net::SocketAddr) -> Result<(), hyper::Error> {
     let make_svc = make_service_fn(|_conn| async {
         Ok::<_, hyper::Error>(service_fn(|req: Request<Body>| async move {
-            if req.uri().path() == "/metrics" {
-                let encoder = TextEncoder::new();
-                let metric_families = prometheus::gather();
-                let mut buffer = Vec::new();
-                encoder.encode(&metric_families, &mut buffer).unwrap();
-                Ok::<_, hyper::Error>(Response::builder()
-                    .status(200)
-                    .header("Content-Type", encoder.format_type())
-                    .body(Body::from(buffer))
-                    .unwrap())
-            } else {
-                Ok::<_, hyper::Error>(Response::builder()
-                    .status(404)
-                    .body(Body::from("Not Found"))
-                    .unwrap())
+            match req.uri().path() {
+                "/metrics" => {
+                    let encoder = TextEncoder::new();
+                    let metric_families = prometheus::gather();
+                    let mut buffer = Vec::new();
+                    encoder.encode(&metric_families, &mut buffer).unwrap();
+                    return Ok::<_, hyper::Error>(Response::builder()
+                        .status(200)
+                        .header("Content-Type", encoder.format_type())
+                        .body(Body::from(buffer))
+                        .unwrap());
+                }
+                "/healthz" => {
+                    return Ok::<_, hyper::Error>(Response::builder()
+                        .status(200)
+                        .header("Content-Type", "text/plain")
+                        .body(Body::from(format!("OK {}", BUILD_VERSION)))
+                        .unwrap());
+                }
+                _ => {}
             }
+            // fallback 404
+            Ok::<_, hyper::Error>(Response::builder()
+                .status(404)
+                .body(Body::from("Not Found"))
+                .unwrap())
         }))
     });
     Server::bind(&addr).serve(make_svc).await

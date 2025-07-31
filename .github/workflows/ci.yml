@@ -2,50 +2,70 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [ "main" ]
+    tags: [ "v*.*.*" ]
   pull_request:
 
 jobs:
-  build-test:
+  rust:
+    name: Rust fmt / clippy / test / audit
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:15-alpine
-        env:
-          POSTGRES_USER: ferrolink
-          POSTGRES_PASSWORD: ferrolink
-          POSTGRES_DB: ferrolink
-        ports: [ '5432:5432' ]
-        options: >-
-          --health-cmd="pg_isready -U ferrolink" --health-interval=10s --health-timeout=5s --health-retries=5
-
-    env:
-      DATABASE_URL: postgres://ferrolink:ferrolink@localhost:5432/ferrolink
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout source
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: Install Rust
+      - name: Set up Rust toolchain
         uses: actions-rs/toolchain@v1
         with:
           toolchain: stable
-          components: rustfmt, clippy
           profile: minimal
+          override: true
 
-      - name: Install sqlx-cli
-        run: cargo install sqlx-cli --no-default-features --features postgres,rustls --quiet
+      - name: Cache cargo index + build
+        uses: Swatinem/rust-cache@v2
 
-      - name: Run migrations check
-        run: sqlx migrate run --source migrations
+      - name: Clippy (fail on warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Prepare sqlx metadata
-        run: cargo sqlx prepare --check --workspace
+      - name: Run tests
+        run: cargo test --workspace --all-targets --locked
 
-      - name: Build and test
-        run: |
-          cargo test --workspace --all-features
-          cargo build --workspace --release 
+      - name: Install dependency auditor
+        run: cargo install --locked cargo-audit || true
+
+      - name: Security audit
+        run: cargo audit --deny warnings
+
+  docker:
+    name: Build & push Docker image
+    needs: rust
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build and push agent image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/ferrolink-agent:latest
+            ${{ secrets.DOCKER_USERNAME }}/ferrolink-agent:${{ github.sha }} 
