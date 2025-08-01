@@ -13,6 +13,13 @@ COPY agent/Cargo.toml ./agent/
 COPY shared/Cargo.toml ./shared/
 COPY client/Cargo.toml ./client/
 
+
+# copy stub src so cargo metadata succeeds
+COPY shared/src shared/src
+COPY agent/src  agent/src
+COPY client/src client/src  
+RUN cargo chef prepare --recipe-path recipe.json
+
 # Compute dependency graph
 RUN cargo chef prepare --recipe-path recipe.json
 
@@ -20,6 +27,9 @@ RUN cargo chef prepare --recipe-path recipe.json
 FROM rust:${RUST_TAG} AS builder
 RUN apk add --no-cache musl-dev clang llvm openssl-dev pkgconf
 WORKDIR /app
+
+# bring in the cargo-chef executable that was built earlier
+COPY --from=planner /usr/local/cargo/bin/cargo-chef /usr/local/cargo/bin/
 
 # Re-use the cached dependency layer
 COPY --from=planner /app/recipe.json recipe.json

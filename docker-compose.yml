@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   agent:
     build: .
@@ -24,12 +22,18 @@ services:
       - "5432:5432"
 
   migrate:
-    image: ghcr.io/sqlx-rs/sqlx-cli:0.7.3-rustls
+    image: rust:1.88-alpine            # public image – no login needed
     depends_on: [postgres]
+    working_dir: /work
     volumes:
-      - ./migrations:/migrations:ro
+      - ./migrations:/work/migrations:ro
     env_file: .env
-    command: ["sqlx", "migrate", "run", "--source", "/migrations"]
+    entrypoint: >
+      sh -c "
+        apk add --no-cache musl-dev clang llvm openssl-dev pkgconf &&
+        cargo install sqlx-cli --no-default-features --features rustls,postgres &&
+        sqlx migrate run --source ./migrations
+      "
     restart: "no"
 
   prometheus:
