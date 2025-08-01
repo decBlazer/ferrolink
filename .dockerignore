@@ -11,3 +11,5 @@ docker-compose.yml
 uploads/ 
 dashboard/node_modules
 dashboard/dist 
+certs
+*.srl
