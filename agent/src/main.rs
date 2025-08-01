@@ -14,7 +14,7 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 use clap::Parser;
 use tracing::{info, error};
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{EnvFilter};
 use futures::Sink;
 use std::fs::File;
 use std::io::BufReader;
@@ -28,6 +28,9 @@ use hyper::{Body, Request, Response, Server};
 use hyper::service::{make_service_fn, service_fn};
 use once_cell::sync::Lazy;
 use prometheus::{Encoder, TextEncoder, IntCounter, HistogramVec, register_int_counter, register_histogram_vec};
+use sqlx::PgPool;
+use serde_json::json;
+use std::io::{Write};
 // Build info
 const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message as EmailMessage, Tokio1Executor, transport::smtp::authentication::Credentials};
@@ -99,6 +102,10 @@ struct Args {
     /// Comma-separated list of email addresses to notify
     #[arg(long)]
     notify_emails: Option<String>,
+
+    /// PostgreSQL DSN for log storage (e.g. postgres://user:pass@host:5432/db)
+    #[arg(long, env = "DATABASE_URL")]
+    database_url: Option<String>,
 }
 
 // File transfer state tracking
@@ -253,15 +260,63 @@ impl Notifier {
     }
 }
 
+// ---------- tracing writer that inserts into Postgres -----------------
+#[derive(Clone)]
+struct DBWriter {
+    pool: PgPool,
+}
+
+impl Write for DBWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if let Ok(line) = std::str::from_utf8(buf) {
+            // expected format: "2025-... INFO  message..."
+            let mut parts = line.splitn(3, ' ');
+            if let (Some(ts), Some(level), Some(msg)) = (parts.next(), parts.next(), parts.next()) {
+                let pool = self.pool.clone();
+                let ts_string = ts.to_string();
+                let level_string = level.to_string();
+                let msg_string = msg.trim().to_string();
+                tokio::spawn(async move {
+                    let _ = sqlx::query(
+                        "INSERT INTO agent_logs (ts, level, message, fields) VALUES ($1,$2,$3,$4)"
+                    )
+                    .bind(ts_string)
+                    .bind(level_string)
+                    .bind(msg_string)
+                    .bind(json!({}))
+                    .execute(&pool)
+                    .await;
+                });
+            }
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+}
+// -------------------------------------------------------------
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize tracing subscriber (env-controlled log level)
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .init();
+    let args = Args::parse();
+
+    // optional DB pool for logging
+    let db_pool_opt = if let Some(dsn) = &args.database_url {
+        Some(PgPool::connect(dsn).await.expect("connect DB"))
+    } else { None };
+
+    if let Some(pool) = db_pool_opt.clone() {
+        tracing_subscriber::fmt()
+            .with_env_filter(EnvFilter::from_default_env())
+            .with_writer(move || DBWriter { pool: pool.clone() })
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(EnvFilter::from_default_env())
+            .init();
+    }
     dotenv().ok();
 
-    let args = Args::parse();
     let notifier = Notifier::new(&args);
     let addr = format!("{}:{}", args.host, args.port);
     info!("Starting agent on {}", addr);

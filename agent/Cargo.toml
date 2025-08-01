@@ -27,5 +27,5 @@ hex = "0.4"
 lettre = { version = "0.10.0-rc.4", default-features = false, features = ["tokio1-rustls-tls", "smtp-transport", "builder"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 reqwest = { version = "0.11", features = ["json", "rustls-tls"] }
-sqlx = { version = "0.7", features = ["postgres", "runtime-tokio-rustls", "macros"] }
+sqlx = { version = "0.7", default-features = false, features = ["runtime-tokio-rustls", "postgres", "json"] }
 dotenvy = "0.15"

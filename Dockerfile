@@ -1,51 +1,39 @@
-# syntax=docker/dockerfile:1
-
-###############################
-# Stage 1 – Compile static MUSL #
-###############################
-FROM rust:1.77-slim AS builder
-
-# Target defaults to host glibc (x86_64-unknown-linux-gnu)
-ARG CARGO_TERM_COLOR=always
-
+# ────────────────────────────── Builder stage ──────────────────────────────
+# Rust toolchain ≥1.88 parses Cargo.lock v4
+FROM rust:1.88-alpine AS builder            
 WORKDIR /app
 
-# ---- System deps ----
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends pkg-config libssl-dev ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
 
-# ---- Layered caching for Rust deps ----
-COPY Cargo.toml Cargo.lock ./
-COPY shared/Cargo.toml ./shared/Cargo.toml
-COPY agent/Cargo.toml ./agent/Cargo.toml
-COPY client/Cargo.toml ./client/Cargo.toml
+# Copy the whole workspace in one layer; leverage Cargo’s caching
+COPY . .
 
-# Copy full workspace & build
+# add the dev libs that openssl-sys expects
+RUN apk add --no-cache musl-dev clang llvm \
+                       openssl-dev pkgconf
+
 COPY . .
 RUN cargo build --release --locked -p agent \
-    && strip target/release/agent
+ && strip target/release/agent
 
-#############################
-# Stage 2 – Distroless image #
-#############################
-FROM gcr.io/distroless/cc-debian12:nonroot AS runtime
-
-# Target defaults to host glibc (x86_64-unknown-linux-gnu)
-ARG CARGO_TERM_COLOR=always
-
+# ────────────────────────────── Runtime stage ──────────────────────────────
+FROM alpine:3.20
 WORKDIR /app
 
-# Copy binary
-COPY --from=builder /app/target/release/agent /agent
+# Non-root user (optional)
+RUN adduser -D -u 1000 ferrolink \
+ && mkdir /uploads \
+ && chown ferrolink:ferrolink /uploads
+USER ferrolink
 
-# Upload directory (bind-mount or volume)
-VOLUME ["/app/uploads"]
+# binary from builder
+COPY --from=builder /app/target/release/agent /usr/local/bin/agent
 
-EXPOSE 8443 9090
+# mount points for secret certs and uploads
+VOLUME /certs
+VOLUME /uploads
 
-# Default log level
-ENV RUST_LOG=info
+EXPOSE 8080 9090
 
-ENTRYPOINT ["/agent"]
-CMD ["--host","0.0.0.0", "--port","8443", "--metrics-port","9090", "--upload-dir","/app/uploads", "--cert-path","/app/cert.pem", "--key-path","/app/key.pem"] 
+# default command uses mounted certs and uploads dir
+ENTRYPOINT ["/usr/local/bin/agent"]
+CMD ["--host","0.0.0.0","--cert-path","/certs/server.pem","--key-path","/certs/server-key.pem","--upload-dir","/uploads"]

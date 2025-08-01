@@ -1,3 +1,6 @@
 [workspace]
 members = ["shared", "agent", "client"]
 resolver = "2"
+
+[workspace.dependencies]
+base64ct = "=1.7.3"
