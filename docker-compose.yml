@@ -5,8 +5,8 @@ services:
     env_file: .env
     volumes:
       - ./uploads:/app/uploads
-      - ./cert.pem:/app/cert.pem:ro
-      - ./key.pem:/app/key.pem:ro
+      - ./cert.pem:/certs/server.pem:ro
+      - ./key.pem:/certs/server-key.pem:ro  
     ports:
       - "8080:8080"
       - "9090:9090"
