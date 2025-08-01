@@ -135,7 +135,8 @@ cargo run -p client -- --cert-path ca-cert.pem tui
 ## 6. Prometheus & Dashboard
 
 * Prometheus UI → <http://localhost:9091>
-* `/metrics` endpoint exported by Agent → <https://localhost:9090/metrics>
+* `/metrics` endpoint exported by Agent → <http://localhost:9090/metrics>
+  (root `/` returns 404 by design)
 * Static dashboard (if you built it) → <http://localhost:3000>
 
 ---
