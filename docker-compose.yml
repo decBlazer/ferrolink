@@ -6,7 +6,9 @@ services:
     volumes:
       - ./uploads:/app/uploads
       - ./cert.pem:/certs/server.pem:ro
-      - ./key.pem:/certs/server-key.pem:ro  
+      - ./key.pem:/certs/server-key.pem:ro 
+      - ./server.pem:/certs/server.pem:ro
+      - ./server-key.pem:/certs/server-key.pem:ro 
     ports:
       - "8080:8080"
       - "9090:9090"
