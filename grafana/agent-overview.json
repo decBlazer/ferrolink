@@ -1,0 +1,44 @@
+{
+  "title": "FerroLink – Agent Overview",
+  "time": { "from": "now-1h", "to": "now" },
+  "panels": [
+    {
+      "type": "graph",
+      "title": "CPU Usage (%)",
+      "targets": [
+        {
+          "expr": "100 * (1 - avg by(instance)(rate(node_cpu_seconds_total{mode=\"idle\"}[5m])))",
+          "legendFormat": "CPU"
+        }
+      ],
+      "datasource": "Prometheus",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 0 }
+    },
+    {
+      "type": "graph",
+      "title": "Memory Usage (bytes)",
+      "targets": [
+        {
+          "expr": "node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes",
+          "legendFormat": "Used"
+        }
+      ],
+      "datasource": "Prometheus",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 8 }
+    },
+    {
+      "type": "graph",
+      "title": "Command latency (p90)",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.90, sum(rate(command_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p90"
+        }
+      ],
+      "datasource": "Prometheus",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 }
+    }
+  ],
+  "schemaVersion": 36,
+  "version": 1
+} 

@@ -1,0 +1,11 @@
+groups:
+  - name: ferrolink
+    rules:
+      - alert: FerroLinkAgentDown
+        expr: up{job="ferrolink-agent"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "FerroLink agent is down"
+          description: "No scrape data for ferrolink-agent for more than 1 minute." 
