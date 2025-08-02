@@ -1,3 +1,4 @@
+#![allow(clippy::uninlined_format_args)]
 use shared::{Message, SystemMetrics, MemoryInfo, DiskInfo, DEFAULT_HOST, DEFAULT_PORT};
 use shared::Event;
 use tokio_util::codec::{LengthDelimitedCodec, FramedRead, FramedWrite};
@@ -203,7 +204,7 @@ async fn start_metrics_server(addr: std::net::SocketAddr) -> Result<(), hyper::E
                     return Ok::<_, hyper::Error>(Response::builder()
                         .status(200)
                         .header("Content-Type", "text/plain")
-                        .body(Body::from(format!("OK {}", BUILD_VERSION)))
+                        .body(Body::from(format!("OK {BUILD_VERSION}")))
                         .unwrap());
                 }
                 _ => {}
@@ -318,7 +319,7 @@ async fn main() -> Result<()> {
     dotenv().ok();
 
     let notifier = Notifier::new(&args);
-    let addr = format!("{}:{}", args.host, args.port);
+    let addr = format!("{host}:{port}", host = args.host, port = args.port);
     info!("Starting agent on {}", addr);
     info!("Upload directory: {}", args.upload_dir);
     
@@ -350,10 +351,10 @@ async fn main() -> Result<()> {
     let upload_dir = Arc::new(args.upload_dir);
     
     // Spawn Prometheus metrics endpoint
-    let metrics_addr = format!("0.0.0.0:{}", args.metrics_port).parse().expect("metrics addr");
+    let metrics_addr = format!("0.0.0.0:{port}", port = args.metrics_port).parse().expect("metrics addr");
     tokio::spawn(async move {
         if let Err(e) = start_metrics_server(metrics_addr).await {
-            eprintln!("Metrics server failed: {}", e);
+            eprintln!("Metrics server failed: {e}");
         }
     });
 
@@ -473,7 +474,7 @@ where
                             error!("Failed to send command result: {}", e);
                         }
                         // After sending CommandResult, also push an Event
-                        if let Err(e) = send_msg(&mut writer, &Message::Event(Event { kind: "CommandFinished".into(), message: format!("Command {} finished (success: {})", command_id, success) })).await {
+                        if let Err(e) = send_msg(&mut writer, &Message::Event(Event { kind: "CommandFinished".into(), message: format!("Command {command_id} finished (success: {success})") })).await {
                             error!("Failed to send event: {}", e);
                         }
                     }
@@ -482,7 +483,7 @@ where
                             command_id,
                             success: false,
                             stdout: String::new(),
-                            stderr: format!("Failed to execute command: {}", e),
+                            stderr: format!("Failed to execute command: {e}"),
                             exit_code: -1,
                         };
                         send_msg(&mut writer, &result_msg).await.ok();
@@ -490,7 +491,7 @@ where
                 }
             }
             Message::FileHashRequest { filename } => {
-                let full_path = format!("{}/{}", upload_dir, filename);
+                let full_path = format!("{upload_dir}/{filename}");
                 let hash_opt = match tokio::fs::read(&full_path).await {
                     Ok(bytes) => {
                         let mut hasher = Sha256::new();
@@ -716,7 +717,7 @@ where
             tokio::fs::create_dir_all(upload_dir).await.ok();
             
             // Write file to upload directory
-            let file_path = format!("{}/{}", upload_dir, transfer_state.filename);
+            let file_path = format!("{upload_dir}/{filename}");
             match tokio::fs::write(&file_path, &file_data).await {
                 Ok(_) => {
                     println!("Successfully wrote file: {} ({} bytes)", file_path, file_data.len());
@@ -724,7 +725,7 @@ where
                 }
                 Err(e) => {
                     eprintln!("Failed to write file {}: {}", transfer_state.filename, e);
-                    Some((false, Some(format!("Failed to write file: {}", e))))
+                    Some((false, Some(format!("Failed to write file: {e}"))))
                 }
             }
         } else {
@@ -742,7 +743,7 @@ where
             FILE_TRANSFERS_TOTAL.inc();
 
             // Notify client
-            send_msg(writer, &Message::Event(Event { kind: "FileTransferComplete".into(), message: format!("{} uploaded successfully", filename) })).await.ok();
+            send_msg(writer, &Message::Event(Event { kind: "FileTransferComplete".into(), message: format!("{filename} uploaded successfully") })).await.ok();
         } else {
             info!("File transfer failed: {}", filename);
         }

@@ -1,3 +1,4 @@
+#![allow(clippy::uninlined_format_args)]
 use shared::{Message, SystemMetrics, DEFAULT_HOST, DEFAULT_PORT};
 use tokio_util::codec::{LengthDelimitedCodec, FramedRead, FramedWrite};
 use bytes::Bytes;
@@ -110,7 +111,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let args = Args::parse();
-    let addr = format!("{}:{}", args.host, args.port);
+    let addr = format!("{host}:{port}", host = args.host, port = args.port);
 
     // Build TLS connector once
     let connector = build_tls_connector(&args.cert_path, &args.client_cert, &args.client_key)?;
@@ -187,8 +188,8 @@ async fn ping_agent(addr: &str, connector: &TlsConnector, host: &str, token: &Op
         let auth_frame = reader.next().await.ok_or("No auth response")??;
         match serde_json::from_slice::<Message>(&auth_frame)? {
             Message::AuthOk => info!("Authenticated successfully"),
-            Message::AuthErr { reason } => return Err(format!("Authentication failed: {}", reason).into()),
-            other => return Err(format!("Unexpected auth response: {:?}", other).into()),
+            Message::AuthErr { reason } => return Err(format!("Authentication failed: {reason}").into()),
+            other => return Err(format!("Unexpected auth response: {other:?}").into()),
         }
     }
 
@@ -229,8 +230,8 @@ async fn get_system_metrics(addr: &str, connector: &TlsConnector, host: &str, to
         let auth_frame = reader.next().await.ok_or("No auth response")??;
         match serde_json::from_slice::<Message>(&auth_frame)? {
             Message::AuthOk => info!("Authenticated successfully"),
-            Message::AuthErr { reason } => return Err(format!("Authentication failed: {}", reason).into()),
-            other => return Err(format!("Unexpected auth response: {:?}", other).into()),
+            Message::AuthErr { reason } => return Err(format!("Authentication failed: {reason}").into()),
+            other => return Err(format!("Unexpected auth response: {other:?}").into()),
         }
     }
 
@@ -315,8 +316,8 @@ async fn send_file(addr: &str, connector: &TlsConnector, host: &str, file_path: 
         let auth_frame = reader.next().await.ok_or("No auth response")??;
         match serde_json::from_slice::<Message>(&auth_frame)? {
             Message::AuthOk => info!("Authenticated successfully"),
-            Message::AuthErr { reason } => return Err(format!("Authentication failed: {}", reason).into()),
-            other => return Err(format!("Unexpected auth response: {:?}", other).into()),
+            Message::AuthErr { reason } => return Err(format!("Authentication failed: {reason}").into()),
+            other => return Err(format!("Unexpected auth response: {other:?}").into()),
         }
     }
 
@@ -339,7 +340,7 @@ async fn send_file(addr: &str, connector: &TlsConnector, host: &str, file_path: 
         Message::FileTransferReady { transfer_id: ready_id } if ready_id == transfer_id => {
             info!("Agent ready to receive file");
         }
-        other => return Err(format!("Unexpected response: {:?}", other).into()),
+        other => return Err(format!("Unexpected response: {other:?}").into()),
     }
 
     // Open the file and read in chunks
@@ -371,7 +372,7 @@ async fn send_file(addr: &str, connector: &TlsConnector, host: &str, file_path: 
             Message::ChunkReceived { transfer_id: ack_id, chunk_number: ack_chunk } if ack_id == transfer_id && ack_chunk == chunk_number => {
                 info!("Chunk {} acknowledged", chunk_number);
             }
-            other => return Err(format!("Unexpected response: {:?}", other).into()),
+            other => return Err(format!("Unexpected response: {other:?}").into()),
         }
 
         chunk_number += 1;
@@ -413,7 +414,7 @@ async fn send_magic_packet(mac_str: &str, port: u16) -> Result<(), Box<dyn std::
         packet.extend_from_slice(&bytes);
     }
      
-    let addr = format!("255.255.255.255:{}", port);
+    let addr = format!("255.255.255.255:{port}", port = port);
     let socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await?;
     socket.set_broadcast(true)?;
     
@@ -439,8 +440,8 @@ async fn exec_command(addr: &str, connector: &TlsConnector, host: &str, program:
         let auth_frame = reader.next().await.ok_or("No auth response")??;
         match serde_json::from_slice::<Message>(&auth_frame)? {
             Message::AuthOk => info!("Authenticated successfully"),
-            Message::AuthErr { reason } => return Err(format!("Authentication failed: {}", reason).into()),
-            other => return Err(format!("Unexpected auth response: {:?}", other).into()),
+            Message::AuthErr { reason } => return Err(format!("Authentication failed: {reason}").into()),
+            other => return Err(format!("Unexpected auth response: {other:?}").into()),
         }
     }
 
@@ -458,12 +459,12 @@ async fn exec_command(addr: &str, connector: &TlsConnector, host: &str, program:
         let bytes = frame?;
         match serde_json::from_slice::<Message>(&bytes)? {
             Message::CommandResult { command_id: res_id, success, stdout, stderr, exit_code } if res_id == command_id => {
-                println!("Command exited with code {} (success: {})", exit_code, success);
+                println!("Command exited with code {exit_code} (success: {success})");
                 if !stdout.is_empty() {
-                    println!("\n--- STDOUT ---\n{}", stdout);
+                    println!("\n--- STDOUT ---\n{stdout}");
                 }
                 if !stderr.is_empty() {
-                    println!("\n--- STDERR ---\n{}", stderr);
+                    println!("\n--- STDERR ---\n{stderr}");
                 }
                 break;
             }
@@ -493,8 +494,8 @@ async fn watch_metrics(addr: &str, connector: &TlsConnector, host: &str, interva
         let auth_frame = reader.next().await.ok_or("No auth response")??;
         match serde_json::from_slice::<Message>(&auth_frame)? {
             Message::AuthOk => info!("Authenticated successfully"),
-            Message::AuthErr { reason } => return Err(format!("Authentication failed: {}", reason).into()),
-            other => return Err(format!("Unexpected auth response: {:?}", other).into()),
+            Message::AuthErr { reason } => return Err(format!("Authentication failed: {reason}").into()),
+            other => return Err(format!("Unexpected auth response: {other:?}").into()),
         }
     }
 
@@ -553,8 +554,8 @@ async fn sync_file(addr: &str, connector: &TlsConnector, host: &str, file_path: 
         let auth_frame = reader.next().await.ok_or("No auth response")??;
         match serde_json::from_slice::<Message>(&auth_frame)? {
             Message::AuthOk => info!("Authenticated successfully"),
-            Message::AuthErr { reason } => return Err(format!("Authentication failed: {}", reason).into()),
-            other => return Err(format!("Unexpected auth response: {:?}", other).into()),
+            Message::AuthErr { reason } => return Err(format!("Authentication failed: {reason}").into()),
+            other => return Err(format!("Unexpected auth response: {other:?}").into()),
         }
     }
 
@@ -564,12 +565,12 @@ async fn sync_file(addr: &str, connector: &TlsConnector, host: &str, file_path: 
     let resp_frame = reader.next().await.ok_or("No hash response from agent")??;
     let remote_hash_opt = match serde_json::from_slice::<Message>(&resp_frame)? {
         Message::FileHashResponse { filename: _, hash } => hash,
-        other => return Err(format!("Unexpected response: {:?}", other).into()),
+        other => return Err(format!("Unexpected response: {other:?}").into()),
     };
 
     if let Some(remote_hash) = remote_hash_opt {
         if remote_hash == local_hash {
-            println!("✅ File {} is already up to date on agent.", filename);
+            println!("✅ File {filename} is already up to date on agent.", filename = filename);
             return Ok(());
         } else {
             println!("🔄 File differs (remote hash mismatch). Uploading new version...");
@@ -605,7 +606,7 @@ async fn run_tui(addr: &str, connector: &TlsConnector, host: &str, interval_secs
                     let _ = tx.send(Some(metrics));
                 }
                 Err(e) => {
-                    eprintln!("Failed to fetch metrics: {}", e);
+                    eprintln!("Failed to fetch metrics: {e}", e = e);
                 }
             }
             sleep(Duration::from_secs(interval_secs)).await;
@@ -637,7 +638,7 @@ async fn run_tui(addr: &str, connector: &TlsConnector, host: &str, interval_secs
                     m.memory.usage_percent,
                     m.memory.used_bytes as f64 / 1024.0 / 1024.0 / 1024.0,
                     m.memory.total_bytes as f64 / 1024.0 / 1024.0 / 1024.0,
-                    m.disks.iter().map(|d| format!("{} {:.1}%", d.mount_point, d.usage_percent)).collect::<Vec<_>>().join(" | ")
+                    m.disks.iter().map(|d| format!("{mp} {usage:.1}%", mp = d.mount_point, usage = d.usage_percent)).collect::<Vec<_>>().join(" | ")
                 )
             } else {
                 "Waiting for metrics...".to_string()
@@ -680,7 +681,7 @@ async fn fetch_metrics_once(addr: &str, connector: &TlsConnector, host: &str, to
         let auth_frame = reader.next().await.ok_or("No auth response")??;
         match serde_json::from_slice::<Message>(&auth_frame)? {
             Message::AuthOk => (),
-            Message::AuthErr { reason } => return Err(format!("Auth failed: {}", reason).into()),
+            Message::AuthErr { reason } => return Err(format!("Auth failed: {reason}").into()),
             _ => return Err("Unexpected auth response".into()),
         }
     }
@@ -689,7 +690,7 @@ async fn fetch_metrics_once(addr: &str, connector: &TlsConnector, host: &str, to
     let frame = reader.next().await.ok_or("No metrics response")??;
     let metrics = match serde_json::from_slice::<Message>(&frame)? {
         Message::SystemMetrics(m) => m,
-        other => return Err(format!("Unexpected response: {:?}", other).into()),
+        other => return Err(format!("Unexpected response: {other:?}").into()),
     };
 
     // Gracefully close write half so the agent can finish without abrupt EOF
