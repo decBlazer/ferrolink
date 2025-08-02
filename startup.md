@@ -154,4 +154,3 @@ psql postgres://ferrolink:ferropass@localhost:5432/ferrolink
 ```
 
 ---
-Happy hacking & contributions welcome!   
