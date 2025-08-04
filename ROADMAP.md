@@ -21,6 +21,10 @@
 |----------|------|------|-------------|
 | P0 | CI/CD | Add GitHub Actions workflow: build, test, clippy, fmt, docker-build |  |
 | P0 | Security | Automate dev-cert generation (`make dev-certs`) & document LetsEncrypt for prod |  |
+| P0 | Security | Upgrade lettre (=>idna 1.x) and patch idna vuln |  |
+| P0 | Security | Upgrade prometheus to 0.15+ to drop protobuf 2.x |  |
+| P0 | Security | Track rustls 0.22 / ring 0.17 for AES vuln fix |  |
+| P0 | Security | Upgrade sqlx to 0.8 once released |  |
 | P1 | Persistence | Flesh out SQLx migrations; store agent logs & file-transfer metadata |  |
 | P1 | Config/Secrets | Move from `.env` to Docker secrets / Vault integration |  |
 | P1 | Observability | Expand Grafana dashboard (disk IO, network, DB stats) |  |

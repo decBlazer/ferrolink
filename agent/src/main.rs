@@ -19,11 +19,12 @@ use tracing_subscriber::{EnvFilter};
 use futures::Sink;
 use std::fs::File;
 use std::io::BufReader;
-use rustls::{Certificate, PrivateKey, ServerConfig};
-use rustls::server::{AllowAnyAuthenticatedClient};
-use rustls::RootCertStore;
+use rustls::{ServerConfig};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio_rustls::TlsAcceptor;
+use rustls::server::WebPkiClientVerifier;
 use rustls_pemfile::{certs, pkcs8_private_keys, rsa_private_keys};
+use rustls::RootCertStore;
 // Add Prometheus / Hyper imports
 use hyper::{Body, Request, Response, Server};
 use hyper::service::{make_service_fn, service_fn};
@@ -130,26 +131,24 @@ where
 }
 
 // Helper to load certificates
-fn load_certs(path: &str) -> anyhow::Result<Vec<Certificate>> {
+fn load_certs(path: &str) -> anyhow::Result<Vec<CertificateDer<'static>>> {
     let mut reader = BufReader::new(File::open(path)?);
     let certs = certs(&mut reader)?
         .into_iter()
-        .map(Certificate)
+        .map(CertificateDer::from)
         .collect();
     Ok(certs)
 }
 
 // Helper to load private key (PKCS8 or RSA)
-fn load_private_key(path: &str) -> anyhow::Result<PrivateKey> {
+fn load_private_key(path: &str) -> anyhow::Result<PrivateKeyDer<'static>> {
     let mut reader = BufReader::new(File::open(path)?);
-    // Try pkcs8 first
     if let Some(key) = pkcs8_private_keys(&mut reader)?.into_iter().next() {
-        return Ok(PrivateKey(key));
+        return Ok(PrivateKeyDer::Pkcs8(key.into()));
     }
-    // Rewind and try RSA
     let mut reader = BufReader::new(File::open(path)?);
     if let Some(key) = rsa_private_keys(&mut reader)?.into_iter().next() {
-        return Ok(PrivateKey(key));
+        return Ok(PrivateKeyDer::Pkcs1(key.into()));
     }
     anyhow::bail!("No private key found in {}", path)
 }
@@ -327,14 +326,14 @@ async fn main() -> Result<()> {
     let certs = load_certs(&args.cert_path)?;
     let key = load_private_key(&args.key_path)?;
 
-    let builder = ServerConfig::builder().with_safe_defaults();
+    let builder = ServerConfig::builder();
     let tls_config = if let Some(ca_path) = args.ca_cert.as_ref() {
         let ca_certs = load_certs(ca_path)?;
         let mut roots = RootCertStore::empty();
-        for c in ca_certs { roots.add(&c)?; }
-        let verifier = AllowAnyAuthenticatedClient::new(roots);
+        roots.add_parsable_certificates(ca_certs.clone());
+        let verifier = WebPkiClientVerifier::builder(Arc::new(roots)).build().unwrap();
         builder
-            .with_client_cert_verifier(Arc::new(verifier))
+            .with_client_cert_verifier(verifier)
             .with_single_cert(certs, key)?
     } else {
         builder

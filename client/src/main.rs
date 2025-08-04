@@ -5,8 +5,10 @@ use bytes::Bytes;
 use futures::{StreamExt, SinkExt};
 use tracing::{info, error};
 use tracing_subscriber::EnvFilter;
-use rustls::{ClientConfig, RootCertStore};
-use tokio_rustls::{TlsConnector, rustls::client::ServerName};
+use rustls::client::ClientConfig;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+use rustls::RootCertStore;
+use tokio_rustls::TlsConnector;
 use std::sync::Arc;
 use std::fs::File;
 use std::io::BufReader;
@@ -134,26 +136,25 @@ fn build_tls_connector(cert_path: &str, client_cert: &Option<String>, client_key
     let mut root_store = RootCertStore::empty();
     let mut reader = BufReader::new(File::open(cert_path)?);
     let certs_vec = certs(&mut reader)?;
-    for cert in certs_vec {
-        root_store.add(&rustls::Certificate(cert))?;
-    }
+    let ders: Vec<CertificateDer<'static>> = certs_vec.into_iter().map(CertificateDer::from).collect();
+    root_store.add_parsable_certificates(ders.clone());
 
-    let config = ClientConfig::builder().with_safe_defaults().with_root_certificates(root_store);
+    let config = ClientConfig::builder()
+        .with_root_certificates(root_store);
 
     let config = if let (Some(cert_path), Some(key_path)) = (client_cert, client_key) {
         let cert_chain = {
             let mut rdr = BufReader::new(File::open(cert_path)?);
-            certs(&mut rdr)?.into_iter().map(rustls::Certificate).collect::<Vec<_>>()
+            certs(&mut rdr)?.into_iter().map(CertificateDer::from).collect::<Vec<_>>()
         };
         let key = {
             let mut rdr = BufReader::new(File::open(key_path)?);
             if let Some(k) = pkcs8_private_keys(&mut rdr)?.into_iter().next() {
-                rustls::PrivateKey(k)
+                PrivateKeyDer::Pkcs8(k.into())
             } else {
-                // rewind and try RSA
                 let mut rdr = BufReader::new(File::open(key_path)?);
                 let k = rsa_private_keys(&mut rdr)?.into_iter().next().ok_or("No private key")?;
-                rustls::PrivateKey(k)
+                PrivateKeyDer::Pkcs1(k.into())
             }
         };
         config.with_client_auth_cert(cert_chain, key)?
@@ -176,7 +177,7 @@ async fn ping_agent(addr: &str, connector: &TlsConnector, host: &str, token: &Op
     info!("Connecting to agent at {}", addr);
 
     let tcp = TcpStream::connect(addr).await?;
-    let server_name = ServerName::try_from(host)?;
+    let server_name = ServerName::try_from(host.to_string())?;
     let stream = connector.connect(server_name, tcp).await?;
     let (read_half, write_half) = tokio::io::split(stream);
     let mut reader = FramedRead::new(read_half, LengthDelimitedCodec::new());
@@ -219,7 +220,8 @@ async fn get_system_metrics(addr: &str, connector: &TlsConnector, host: &str, to
     info!("Connecting to agent at {}", addr);
 
     let tcp = TcpStream::connect(addr).await?;
-    let stream = connector.connect(ServerName::try_from(host)?, tcp).await?;
+    let server_name = ServerName::try_from(host.to_string())?;
+    let stream = connector.connect(server_name, tcp).await?;
     let (read_half, write_half) = tokio::io::split(stream);
     let mut reader = FramedRead::new(read_half, LengthDelimitedCodec::new());
     let mut writer = FramedWrite::new(write_half, LengthDelimitedCodec::new());
@@ -305,7 +307,8 @@ async fn send_file(addr: &str, connector: &TlsConnector, host: &str, file_path: 
 
     // Connect to agent
     let tcp = TcpStream::connect(addr).await?;
-    let stream = connector.connect(ServerName::try_from(host)?, tcp).await?;
+    let server_name = ServerName::try_from(host.to_string())?;
+    let stream = connector.connect(server_name, tcp).await?;
     let (read_half, write_half) = tokio::io::split(stream);
     let mut reader = FramedRead::new(read_half, LengthDelimitedCodec::new());
     let mut writer = FramedWrite::new(write_half, LengthDelimitedCodec::new());
@@ -429,7 +432,8 @@ async fn exec_command(addr: &str, connector: &TlsConnector, host: &str, program:
     info!("Connecting to agent at {}", addr);
 
     let tcp = TcpStream::connect(addr).await?;
-    let stream = connector.connect(ServerName::try_from(host)?, tcp).await?;
+    let server_name = ServerName::try_from(host.to_string())?;
+    let stream = connector.connect(server_name, tcp).await?;
     let (read_half, write_half) = tokio::io::split(stream);
     let mut reader = FramedRead::new(read_half, LengthDelimitedCodec::new());
     let mut writer = FramedWrite::new(write_half, LengthDelimitedCodec::new());
@@ -483,7 +487,8 @@ async fn watch_metrics(addr: &str, connector: &TlsConnector, host: &str, interva
     info!("Connecting to agent at {} for continuous monitoring", addr);
 
     let tcp = TcpStream::connect(addr).await?;
-    let stream = connector.connect(ServerName::try_from(host)?, tcp).await?;
+    let server_name = ServerName::try_from(host.to_string())?;
+    let stream = connector.connect(server_name, tcp).await?;
     let (read_half, write_half) = tokio::io::split(stream);
     let mut reader = FramedRead::new(read_half, LengthDelimitedCodec::new());
     let mut writer = FramedWrite::new(write_half, LengthDelimitedCodec::new());
@@ -544,7 +549,8 @@ async fn sync_file(addr: &str, connector: &TlsConnector, host: &str, file_path: 
 
     // Connect to agent for hash comparison
     let tcp = TcpStream::connect(addr).await?;
-    let stream = connector.connect(ServerName::try_from(host)?, tcp).await?;
+    let server_name = ServerName::try_from(host.to_string())?;
+    let stream = connector.connect(server_name, tcp).await?;
     let (read_half, write_half) = tokio::io::split(stream);
     let mut reader = FramedRead::new(read_half, LengthDelimitedCodec::new());
     let mut writer = FramedWrite::new(write_half, LengthDelimitedCodec::new());
@@ -670,7 +676,8 @@ async fn run_tui(addr: &str, connector: &TlsConnector, host: &str, interval_secs
 
 async fn fetch_metrics_once(addr: &str, connector: &TlsConnector, host: &str, token: &Option<String>) -> Result<SystemMetrics, Box<dyn std::error::Error>> {
     let tcp = TcpStream::connect(addr).await?;
-    let stream = connector.connect(ServerName::try_from(host)?, tcp).await?;
+    let server_name = ServerName::try_from(host.to_string())?;
+    let stream = connector.connect(server_name, tcp).await?;
     let (mut reader, mut writer) = {
         let (read_half, write_half) = tokio::io::split(stream);
         (FramedRead::new(read_half, LengthDelimitedCodec::new()), FramedWrite::new(write_half, LengthDelimitedCodec::new()))
