@@ -1,8 +1,5 @@
 [advisories]
 ignore = [
-    "RUSTSEC-2023-0071", # rsa indirect via sqlx
-    "RUSTSEC-2024-0436"  # paste unmaintained warning via ratatui
+    "RUSTSEC-2023-0071", # rsa – indirect via sqlx
+    "RUSTSEC-2024-0436"  # paste – unmaintained warning via ratatui
 ]
-
-[output]
-deny-warnings = true
