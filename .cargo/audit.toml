@@ -1,1 +1,14 @@
- 
+[advisories]
+ignore = [
+    # rsa 0.9.8 – indirect via sqlx-mysql macros; no fix yet
+    "RUSTSEC-2023-0071",
+]
+
+[unmaintained]
+ignore = [
+    # paste – only a maintenance warning, indirect via ratatui
+    "RUSTSEC-2024-0436",
+]
+
+[output]
+deny-warnings = true   # new warnings will still break CI
