@@ -32,7 +32,7 @@ jobs:
         id: plt
         run: |
           if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
-            echo "platforms=linux/amd64,linux/arm64" >> $GITHUB_OUTPUT
+            echo "platforms=linux/amd64" >> $GITHUB_OUTPUT
           else
             echo "platforms=linux/amd64" >> $GITHUB_OUTPUT
           fi
